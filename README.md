@@ -91,8 +91,10 @@ Every key can be changed in **Settings → Controls...**. **F11** (or Alt+Enter)
 **Where are my saves?** In `%APPDATA%\open-amagami` (paste that into the address bar of a folder window, or use **Settings → Open
 saves folder**). Updating the program keeps them.
 
-**How do I update?** Download the new zip and unpack it over the old folder, or into a new one. Your saves, settings and copied game
-stay where they are.
+**How do I update?** When a new version is out, the launcher shows a **Get the new version** button that opens the download page
+(the version you have is written beside the title; **Settings → Check for updates** turns the check off). Unpack the new zip over
+the old folder, or into a new one: your saves, settings and copied game stay where they are, and the desktop and Start menu
+shortcuts follow the new folder on their own.
 
 **Can I delete my original copy after it is copied?** Yes. The program keeps its own copy in `%LOCALAPPDATA%\open-amagami`;
 **Settings → Delete copy of the game...** removes it again.
@@ -108,7 +110,7 @@ what you saw (a screenshot of the program helps). Never attach files of the game
 
 ## Status
 
-Early: the first release is **v0.1**. The game's own scripts run unchanged, every scene of the story is run by automatic tests, the
+Early: these are the **v0.1** releases. The game's own scripts run unchanged, every scene of the story is run by automatic tests, the
 drawing is compared with the console version scene by scene, and sound, saves, gamepads and the English translation work. Expect
 rough edges, and tell us about them.
 
@@ -132,7 +134,7 @@ SHA-256 is published with it.
 | `port/src` | the engine, the window, the launcher |
 | `port/script` | our own classes that hook into the game's Settings screen (source and compiled) |
 | `port/skins` | our button pictures |
-| `port/art`, `port/data` | the splash picture; the table of known versions of the game's files |
+| `port/art`, `port/data` | the splash picture and the program's icon; the table of known versions of the game's files |
 | `tools/hokago` | the part of the shared tools needed to compile `port/script` |
 | `docs` | notes on how the engine and its formats work |
 

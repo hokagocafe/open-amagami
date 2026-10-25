@@ -12,7 +12,7 @@ You need **your own copy** of *Amagami ebKore+* for PS Vita (`PCSG00291`), as a 
 
 Windows may warn that the program is not recognised: press **More info**, then **Run anyway**.
 
-Updating: unpack the new zip over the old one. Saves and settings are kept. More help in the [README](https://github.com/hokagocafe/open-amagami#readme).
+Updating: unpack the new zip over the old one; saves, settings and your shortcuts are kept. From v0.1.5 on, the launcher tells you when a new version is out. More help in the [README](https://github.com/hokagocafe/open-amagami#readme).
 
 The zip's SHA-256 is in `SHA256SUMS.txt`, built by this repository's workflow from the tagged source.
 

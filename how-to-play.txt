@@ -30,7 +30,8 @@ CONTROLS
 
 SAVES AND UPDATES
   Saves and settings: %APPDATA%\open-amagami (Settings, "Open saves folder").
-  To update, unpack the new version over this folder: saves are kept.
+  The launcher says when a new version is out ("Get the new version").
+  To update, unpack it over this folder: saves and settings are kept.
   Portable use: put an empty file named portable.txt next to amagami.exe.
 
 HELP
