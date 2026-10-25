@@ -1,0 +1,40 @@
+open-amagami - play Amagami (PS Vita) on Windows from your own copy
+=====================================================================
+
+You need your own copy of Amagami ebKore+ for PS Vita (PCSG00291), as a folder
+of decrypted files (the one with AMAGAMI.IMG and SCENARIO.CPK inside).
+Nothing of the game is in this download.
+
+HOW TO PLAY
+
+  1. Run amagami.exe. The launcher opens.
+     (If Windows says "Windows protected your PC": More info, then Run anyway.)
+  2. Press "Choose game folder..." and pick the folder of your copy.
+     Answer Yes to copy it into the program's own folder.
+     Every check turns green when it is fine.
+  3. Press "Start game".
+
+Next time, run amagami.exe and press "Start game".
+
+ENGLISH
+  If your copy has the English fan translation (v1.1), the game is in English.
+  For a Japanese copy: Settings, "Add English patch...", pick the translation's folder.
+
+CONTROLS
+  A gamepad works when plugged in. The mouse works in the menus.
+  Keyboard: Z confirm, X cancel, arrows move, Enter start, Backspace select,
+            A square, S triangle, Q/W L/R, E/R L2/R2.
+  Change the keys in Settings, "Controls...".
+  F11 or Alt+Enter: full screen.   Esc: quit.
+
+SAVES AND UPDATES
+  Saves and settings: %APPDATA%\open-amagami (Settings, "Open saves folder").
+  To update, unpack the new version over this folder: saves are kept.
+  Portable use: put an empty file named portable.txt next to amagami.exe.
+
+HELP
+  https://github.com/hokagocafe/open-amagami
+  https://hokagocafe.com
+
+This is an unofficial, non-profit fan project, not affiliated with or endorsed
+by the game's makers or publishers. Amagami belongs to its owners.

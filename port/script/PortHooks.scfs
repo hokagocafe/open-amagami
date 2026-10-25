@@ -1,0 +1,21 @@
+class "PortHooks" : "Object" flags=0
+const class "PortSwitch"
+const class "PortSettings"
+const float 0x41900000 ; 18.0
+const float 0x00000000 ; 0.0
+const symbol "new"
+const symbol "length"
+const symbol "put"
+const symbol "getPosY"
+const symbol "count"
+classmethod "configPage" args=2 locals=2 {
+    if (arg0 == 3) {
+        loc0 = arg1[arg1.length() - 1].getPosY() + 18.0f;
+        loc1 = 0;
+        while (loc1 < PortSettings.count()) {
+            arg1.put(PortSwitch.new(loc1, loc0));
+            loc0 = loc0 + 18.0f;
+            loc1 = loc1 + 1;
+        }
+    }
+}

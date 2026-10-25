@@ -1,0 +1,96 @@
+class "PortSwitch" : "Object" flags=0
+ivar 0 "idx"
+ivar 1 "posY"
+ivar 2 "title"
+ivar 3 "value"
+ivar 4 "avail"
+ivar 5 "alpha"
+const class "TextLine"
+const class "TextLineC"
+const class "PortSettings"
+const float 0xc2700000 ; -60.0
+const float 0x41400000 ; 12.0
+const float 0x430d0000 ; 141.0
+const float 0xc3ae0000 ; -348.0
+const float 0x41100000 ; 9.0
+const float 0x3f800000 ; 1.0
+const float 0x3f2aaa9f ; 0.6666659712791443
+const float 0x40400000 ; 3.0
+const float 0x00000000 ; 0.0
+const float 0x41900000 ; 18.0
+const symbol "new"
+const symbol "label"
+const symbol "text"
+const symbol "step"
+const symbol "setText"
+const symbol "setPos"
+const symbol "move"
+const symbol "fade"
+const symbol "fadeLight"
+const symbol "set"
+const symbol "destruct"
+method "initialize" args=2 locals=0 {
+    self.idx = arg0;
+    self.posY = arg1;
+    self.title = TextLine.new(13, -60.0f, 12.0f + arg1, 18, 0, 1, 0);
+    self.title.setText(PortSettings.label(arg0));
+    self.value = TextLineC.new(13, 141.0f, 12.0f + arg1, 18, 0, 1);
+    self.value.setText(PortSettings.text(arg0));
+    self.avail = false;
+    self.alpha = 0.0f;
+    self.set(0.0f);
+}
+method "getPosY" args=0 locals=0 {
+    return self.posY;
+}
+method "getAction" args=0 locals=0 {
+    return nil;
+}
+method "default" args=0 locals=0 {
+}
+method "enable" args=0 locals=0 {
+    self.avail = true;
+    self.title.fadeLight(1.0f, 1, 3.0f);
+    self.set(3.0f);
+}
+method "disable" args=0 locals=0 {
+    self.avail = false;
+    self.title.fadeLight(0.75f, 1, 3.0f);
+    self.set(3.0f);
+}
+method "open" args=0 locals=0 {
+    self.title.setPos(-60.0f, -348.0f + self.posY).move(-60.0f, 12.0f + self.posY, 1, 9.0f);
+    self.value.setPos(141.0f, -348.0f + self.posY).move(141.0f, 12.0f + self.posY, 1, 9.0f);
+}
+method "close" args=0 locals=0 {
+    self.title.move(-60.0f, -348.0f + self.posY, 2, 9.0f);
+    self.value.move(141.0f, -348.0f + self.posY, 2, 9.0f);
+}
+method "fade" args=3 locals=0 {
+    self.alpha = arg0;
+    self.title.fade(arg0, arg1, arg2);
+    self.set(arg2);
+}
+method "set" args=1 locals=0 {
+    if (self.avail) {
+        self.title.fadeLight(1.0f, 1, arg0);
+        self.value.fadeLight(1.0f, 1, arg0);
+    } else {
+        self.title.fadeLight(0.6666659712791443f, 1, arg0);
+        self.value.fadeLight(0.6666659712791443f, 1, arg0);
+    }
+    self.value.setText(PortSettings.text(self.idx));
+    self.value.fade(self.alpha, 1, arg0);
+}
+method "left" args=0 locals=0 {
+    PortSettings.step(self.idx, -1);
+    self.set(3.0f);
+}
+method "right" args=0 locals=0 {
+    PortSettings.step(self.idx, 1);
+    self.set(3.0f);
+}
+method "destruct" args=0 locals=0 {
+    self.title.destruct();
+    self.value.destruct();
+}

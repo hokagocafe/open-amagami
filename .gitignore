@@ -1,0 +1,11 @@
+/build/
+/out/
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+config.ini
+portable-data/
+.vscode/

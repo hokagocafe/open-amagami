@@ -1,0 +1,8 @@
+# Hashes (SHA-256) of the key files of the PS Vita version (PCSG00291) in dumps the program has been checked with.
+# The launcher compares the player's files with this table; a file that is not here is a warning, never an error.
+# sha256  file  label
+2e2469695145d8c021b181a1e44be083fa539b5b48a7f238eed4ac398000e73e AMAGAMI.IMG PCSG00291 with the English fan patch v1.1 (checked 2026-10-25)
+7d0c46040e0ac33fc253d9c4fdf2f688485bb5ee75859e709786110562562a93 SCENARIO.CPK PCSG00291 with the English fan patch v1.1 (checked 2026-10-25)
+e15d59f944cb62f88815491f5fa6169fc7fd89b7ddb660e3dc01f45143f63f6a eboot.bin PCSG00291, decrypted dump (checked 2026-10-23)
+24c12ba0f5e14ee2f33a4bef104965d5e2b2e67d21ad6986322c6a316314bf87 AMAGAMI.IMG PCSG00291, original Japanese (checked 2026-10-25)
+e90928db30e495e60a07bfc27cfa486d1e0c131eea59d72bcbdfe492af83b645 SCENARIO.CPK PCSG00291, original Japanese (checked 2026-10-25)

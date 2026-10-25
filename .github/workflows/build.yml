@@ -1,0 +1,61 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write   # to attach the zip to a release when a tag is pushed
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 32-bit MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x86
+
+      - name: Configure
+        run: cmake -S port -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $dir = "package/open-amagami"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item build/amagami.exe, build/SDL3.dll $dir
+          foreach ($d in 'skins', 'script', 'art', 'data') { Copy-Item "build/$d" $dir -Recurse }
+          Copy-Item README.md, LICENSE, NOTICE.md $dir
+          Copy-Item how-to-play.txt "$dir/How to play.txt"
+          Copy-Item licenses $dir -Recurse
+          Compress-Archive -Path $dir -DestinationPath open-amagami-windows-x86.zip
+          $hash = (Get-FileHash open-amagami-windows-x86.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  open-amagami-windows-x86.zip" | Out-File SHA256SUMS.txt -Encoding ascii
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: open-amagami-windows-x86
+          path: |
+            open-amagami-windows-x86.zip
+            SHA256SUMS.txt
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The players' text first (download, three steps), then GitHub's list of changes.
+          (Get-Content .github/release-notes.md -Raw).Replace('TAG', '${{ github.ref_name }}') | Out-File notes.md -Encoding utf8
+          gh release create "${{ github.ref_name }}" open-amagami-windows-x86.zip SHA256SUMS.txt --title "open-amagami ${{ github.ref_name }}" --notes-file notes.md --generate-notes
