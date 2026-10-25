@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <mmsystem.h>
 #include <shlobj.h>
+#include <shobjidl.h>
 
 #include <algorithm>
 #include <array>
@@ -838,17 +839,31 @@ void write_setting(const std::string& key, const std::string& value) {
     out << key << "=" << value << "\n";
 }
 
+// The modern folder dialog (the one of Open file): an address bar to type or paste a path (a network or \\wsl.localhost
+// folder too), Quick access and search. Returns the folder in the system code page, as before, or "" if cancelled.
 std::string pick_folder(const char* title = "Choose the folder of your PS Vita copy of Amagami (the one with AMAGAMI.IMG and SCENARIO.CPK)") {
-    OleInitialize(nullptr);
-    BROWSEINFOA bi = {};
-    bi.lpszTitle = title;
-    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-    PIDLIST_ABSOLUTE item = SHBrowseForFolderA(&bi);
-    if (!item) return "";
-    char path[MAX_PATH] = {};
-    bool ok = SHGetPathFromIDListA(item, path);
-    CoTaskMemFree(item);
-    return ok ? path : "";
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    std::string out;
+    IFileOpenDialog* dialog = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+        DWORD options = 0;
+        dialog->GetOptions(&options);
+        dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+        wchar_t wide[512] = {};
+        MultiByteToWideChar(CP_ACP, 0, title, -1, wide, 512);
+        dialog->SetTitle(wide);
+        IShellItem* item = nullptr;
+        PWSTR path = nullptr;
+        if (SUCCEEDED(dialog->Show(nullptr)) && SUCCEEDED(dialog->GetResult(&item)) && SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+            char narrow[MAX_PATH * 2] = {};
+            if (WideCharToMultiByte(CP_ACP, 0, path, -1, narrow, int(sizeof narrow), nullptr, nullptr) > 0) out = narrow;
+        }
+        CoTaskMemFree(path);
+        if (item) item->Release();
+        dialog->Release();
+    }
+    if (SUCCEEDED(co)) CoUninitialize();
+    return out;
 }
 
 // The English fan patch (F5-18) as the language layer `<root>/lang/en/extracted`: the player picks the patch's folder (its
