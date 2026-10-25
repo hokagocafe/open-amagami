@@ -24,7 +24,7 @@ jobs:
           arch: x86
 
       - name: Configure
-        run: cmake -S port -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAMG_VERSION=${{ github.ref_name }}
+        run: cmake -S port -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DAMG_VERSION=${{ github.ref_name }}"  # quoted: PowerShell splits an unquoted v0.1.4 at the dot
 
       - name: Build
         run: cmake --build build
