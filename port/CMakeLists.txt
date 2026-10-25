@@ -32,9 +32,13 @@ set_target_properties(amagami_vm_cli PROPERTIES OUTPUT_NAME amagami_vm)
 if(WIN32)
   # The playable front end: a Win32 window, no other dependency.
   add_executable(amagami WIN32 src/win_main.cpp src/d3d_present.cpp src/game_import.cpp src/input.cpp src/data_check.cpp src/launcher.cpp)
-  # The program's icon, from the game's art if it is there (assets/icon/amagami.ico, made by `tools/hokago.py make_ico`
-  # from assets/icon/game-icon.jpg; assets/ is not tracked, D-012). Without it the program has the default icon.
+  # The program's icon: the game's own if it is there (assets/icon/amagami.ico, made by `tools/hokago.py make_ico`
+  # from assets/icon/game-icon.jpg; assets/ is not tracked, D-012), otherwise our mascot (art/amagami.ico, made the
+  # same way from art/icon.svg rendered at 512 pixels), which is what the public builds carry.
   set(AMG_ICON "${CMAKE_CURRENT_SOURCE_DIR}/../assets/icon/amagami.ico")
+  if(NOT EXISTS "${AMG_ICON}")
+    set(AMG_ICON "${CMAKE_CURRENT_SOURCE_DIR}/art/amagami.ico")
+  endif()
   if(EXISTS "${AMG_ICON}")
     enable_language(RC)
     configure_file(res/amagami.rc.in "${CMAKE_CURRENT_BINARY_DIR}/amagami.rc" @ONLY)
