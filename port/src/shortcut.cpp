@@ -116,6 +116,40 @@ std::string create(const std::string& root) {
     return failed;
 }
 
+void refresh(const std::string& root) {
+    if (paths::portable()) return;
+    wchar_t exe[MAX_PATH];
+    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    if (n == 0 || n == MAX_PATH) return;
+    std::wstring dir(exe);
+    dir = dir.substr(0, dir.find_last_of(L"\\/"));
+    const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    std::wstring icon;
+    for (REFKNOWNFOLDERID folder : {FOLDERID_Desktop, FOLDERID_Programs}) {
+        const std::wstring base = known_folder(folder);
+        if (base.empty()) continue;
+        const std::wstring link = base + L"\\Amagami.lnk";
+        std::error_code ec;
+        if (!fs::exists(link, ec)) continue;
+        IShellLinkW* sl = nullptr;
+        if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, reinterpret_cast<void**>(&sl)))) continue;
+        IPersistFile* pf = nullptr;
+        wchar_t target[MAX_PATH] = {};
+        if (SUCCEEDED(sl->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&pf))) && SUCCEEDED(pf->Load(link.c_str(), STGM_READ)))
+            sl->GetPath(target, MAX_PATH, nullptr, SLGP_RAWPATH);
+        if (pf) pf->Release();
+        sl->Release();
+        if (target[0] && lstrcmpiW(target, exe) != 0) {
+            if (icon.empty()) {
+                const std::string file = game_icon_file(root);
+                icon = file.empty() ? std::wstring(exe) : fs::u8path(file).wstring();
+            }
+            write_link(link, exe, dir, icon);
+        }
+    }
+    if (SUCCEEDED(co)) CoUninitialize();
+}
+
 void offer_once(const std::string& root, bool asked, void (*mark_asked)()) {
     if (asked || paths::portable()) return;
     mark_asked();

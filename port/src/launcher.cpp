@@ -14,15 +14,17 @@
 #include "paths.hpp"
 #include "port_settings.hpp"
 #include "shortcut.hpp"
+#include "update_check.hpp"
 
 namespace amg::launcher {
 
 namespace {
 
 constexpr UINT WM_CHECKED = WM_APP + 1;
+constexpr UINT WM_UPDATE = WM_APP + 2;  // lParam: a new std::string with the newer release's tag
 enum {
     ID_START = IDOK, ID_QUIT = IDCANCEL, ID_SETTINGS = 10, ID_FOLDER = 11, ID_DELETE = 12, ID_SAVES = 13, ID_CONTROLS = 14,
-    ID_DEFAULTS = 15, ID_ENGLISH = 16, ID_SHORTCUT = 17, ID_ROW0 = 100, ID_KEY0 = 300
+    ID_DEFAULTS = 15, ID_ENGLISH = 16, ID_SHORTCUT = 17, ID_UPDATE = 18, ID_ROW0 = 100, ID_KEY0 = 300
 };
 
 const COLORREF BACKGROUND = RGB(247, 246, 244), INK = RGB(40, 35, 62), MUTED = RGB(93, 88, 112), GOOD = RGB(46, 150, 90),
@@ -406,7 +408,7 @@ struct Launcher {
     bool checking = false;
     bool closed = false;
     int generation = 0;
-    HWND win = nullptr, start = nullptr;
+    HWND win = nullptr, start = nullptr, update = nullptr;
     HFONT body = nullptr, bold = nullptr, title = nullptr;
 };
 
@@ -440,6 +442,10 @@ void paint(Launcher& l, HDC dc, const RECT& client) {
     SetTextColor(dc, MUTED);
     r = {margin, 52, client.right - margin, 76};
     DrawTextW(dc, l.checking ? L"Checking your game folder..." : L"Your game folder", -1, &r, DT_LEFT | DT_SINGLELINE);
+    // The program's version, quietly in the corner beside the title.
+    r = {margin, 26, client.right - margin, 50};
+    const std::wstring version = L"open-amagami " + widen(update_check::current());
+    DrawTextW(dc, version.c_str(), -1, &r, DT_RIGHT | DT_SINGLELINE);
     int y = 86;
     for (const Check& c : l.checks) {
         const COLORREF colour = c.status == Check::Ok ? GOOD : c.status == Check::Warn ? WARN : BAD;
@@ -518,6 +524,15 @@ LRESULT CALLBACK launcher_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM lp) {
         }
         case WM_ERASEBKGND:
             return 1;
+        case WM_UPDATE: {
+            std::unique_ptr<std::string> tag(reinterpret_cast<std::string*>(lp));
+            if (l && l->update) {
+                const std::wstring text = L"Get the new version, " + widen(*tag);
+                SetWindowTextW(l->update, text.c_str());
+                ShowWindow(l->update, SW_SHOW);
+            }
+            return 0;
+        }
         case WM_CHECKED: {
             std::unique_ptr<Answer> a(reinterpret_cast<Answer*>(lp));
             if (l && a->generation == l->generation) {
@@ -531,7 +546,9 @@ LRESULT CALLBACK launcher_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM lp) {
         case WM_COMMAND: {
             if (!l) return 0;
             const int id = LOWORD(w);
-            if (id == ID_START && l->start && IsWindowEnabled(l->start)) {
+            if (id == ID_UPDATE) {
+                ShellExecuteW(nullptr, L"open", update_check::PAGE, nullptr, nullptr, SW_SHOWNORMAL);
+            } else if (id == ID_START && l->start && IsWindowEnabled(l->start)) {
                 l->result = l->root;
                 DestroyWindow(hwnd);
             } else if (id == ID_QUIT) {
@@ -594,6 +611,16 @@ std::string run(HINSTANCE inst, const std::string& root, const Services& service
     make_button(l.win, L"Choose game folder...", ID_FOLDER, 24, by, 176, 36, l.body);
     make_button(l.win, L"Settings", ID_SETTINGS, width - 24 - 130 - 12 - 110, by, 110, 36, l.body);
     l.start = make_button(l.win, L"Start game", ID_START, width - 24 - 130, by, 130, 36, l.bold, true);
+    // Hidden until GitHub says there is a newer release (update_check.hpp; Settings, Check for updates).
+    l.update = make_button(l.win, L"", ID_UPDATE, 24, by - 46, 260, 32, l.bold);
+    ShowWindow(l.update, SW_HIDE);
+    if (services.read_setting("updates") != "off") {
+        HWND hwnd = l.win;
+        std::thread([hwnd] {
+            const std::string tag = update_check::latest();
+            if (update_check::is_newer(tag) && IsWindow(hwnd)) PostMessageW(hwnd, WM_UPDATE, 0, LPARAM(new std::string(tag)));
+        }).detach();
+    }
     recheck(l);
     SetForegroundWindow(l.win);
     pump(l.win, l.closed);

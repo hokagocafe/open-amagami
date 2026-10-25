@@ -19,6 +19,10 @@ HICON load_game_icon(const std::string& root, int size);
 // game's icon from `root` (the program's own icon if the copy has none); "" when both were made, otherwise what failed.
 std::string create(const std::string& root);
 
+// Points existing "Amagami" shortcuts (desktop, Start menu) at this program when they lead elsewhere, as after unpacking a
+// new version into another folder. Never makes new ones, and does nothing in portable mode.
+void refresh(const std::string& root);
+
 // Offers the shortcuts once (after the first setup), unless in portable mode or already asked. `mark_asked` remembers it.
 void offer_once(const std::string& root, bool asked, void (*mark_asked)());
 

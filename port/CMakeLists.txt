@@ -31,7 +31,11 @@ set_target_properties(amagami_vm_cli PROPERTIES OUTPUT_NAME amagami_vm)
 
 if(WIN32)
   # The playable front end: a Win32 window, no other dependency.
-  add_executable(amagami WIN32 src/win_main.cpp src/d3d_present.cpp src/game_import.cpp src/input.cpp src/data_check.cpp src/launcher.cpp src/shortcut.cpp)
+  add_executable(amagami WIN32 src/win_main.cpp src/d3d_present.cpp src/game_import.cpp src/input.cpp src/data_check.cpp src/launcher.cpp src/shortcut.cpp src/update_check.cpp)
+  # The release this build is ("v0.1.3", given by the release workflow); anything else is a development build, which never
+  # asks for updates.
+  set(AMG_VERSION "dev" CACHE STRING "The release tag this build is")
+  target_compile_definitions(amagami PRIVATE AMG_VERSION="${AMG_VERSION}")
   # The program file's icon: our mascot (art/amagami.ico, made by `tools/hokago.py make_ico` from art/icon.svg rendered at
   # 512 pixels). The windows and the shortcuts show the game's own icon instead, taken from the player's copy at run time
   # (shortcut.cpp).
@@ -42,7 +46,7 @@ if(WIN32)
     target_sources(amagami PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/amagami.rc")
     target_compile_definitions(amagami PRIVATE AMG_HAS_ICON=1)
   endif()
-  target_link_libraries(amagami PRIVATE amagami_vm user32 gdi32 winmm shell32 ole32 uuid comctl32 d3d11 dxgi d3dcompiler bcrypt)
+  target_link_libraries(amagami PRIVATE amagami_vm user32 gdi32 winmm shell32 ole32 uuid comctl32 winhttp d3d11 dxgi d3dcompiler bcrypt)
   # SDL3, for gamepads only (src/third_party/sdl3/README.md, D-025): the 32-bit library and its DLL next to the program.
   set(AMG_SDL "${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/sdl3")
   if(NOT EXISTS "${AMG_SDL}/lib/x86/SDL3.lib")

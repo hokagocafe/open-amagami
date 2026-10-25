@@ -35,6 +35,7 @@ const std::vector<Row>& rows() {
         {"fallback", "Unknown pad", {"playstation", "xbox"}, {"PlayStation", "Xbox"}},
         {"splash", "Splash screen", {"on", "off"}, {"On", "Off"}},
         {"launcher", "Launcher at start", {"show", "skip"}, {"Show", "Skip (Shift shows it)"}},
+        {"updates", "Check for updates", {"on", "off"}, {"On", "Off"}},
     };
     return table;
 }

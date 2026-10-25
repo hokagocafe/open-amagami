@@ -1045,6 +1045,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdline, int show) {
                                args.find("--reimport") != std::string::npos || args.find("--start") != std::string::npos;
         std::string remembered = read_setting("root");
         if (remembered.empty() && amg::check_game_folder(".").empty()) remembered = ".";  // the development layout
+        if (!developer) amg::shortcut::refresh(remembered);  // shortcuts left pointing at an older version's folder
         const bool skip = developer || (read_setting("launcher") == "skip" && !(GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
                                         !remembered.empty() && amg::check_game_folder(remembered).empty());
         std::string chosen;

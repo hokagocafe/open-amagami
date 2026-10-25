@@ -24,7 +24,7 @@ jobs:
           arch: x86
 
       - name: Configure
-        run: cmake -S port -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S port -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DAMG_VERSION=${{ github.ref_name }}
 
       - name: Build
         run: cmake --build build
