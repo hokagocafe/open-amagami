@@ -41,6 +41,7 @@ std::vector<Item> plan(const std::string& src) {
     add(data_file(src, "graph/GRAPH.CPK"), "graph/GRAPH.CPK");
     if (fs::exists(src + "/eboot.bin", ec)) add(src + "/eboot.bin", "eboot.bin");
     else add(src + "/extracted/eboot_decrypted.elf", "extracted/eboot_decrypted.elf");
+    add(src + "/sce_sys/icon0.png", "sce_sys/icon0.png");  // the home screen icon: the shortcuts and windows use it
     for (const char* dir : {"/sound", "/extracted/sound"}) {
         std::string folder = src + dir;
         if (!fs::is_directory(folder, ec)) continue;

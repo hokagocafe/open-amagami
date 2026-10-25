@@ -33,6 +33,7 @@
 #include "audio.hpp"
 #include "d3d_present.hpp"
 #include "data_check.hpp"
+#include "shortcut.hpp"
 #include "datapath.hpp"
 #include "game_import.hpp"
 #include "input.hpp"
@@ -942,6 +943,11 @@ std::string ask_for_copy(std::string candidate) {
     }
 }
 
+// Once the game is set up the first time, the desktop and Start menu shortcuts are offered (once; not in portable mode).
+void offer_shortcuts(const std::string& root) {
+    amg::shortcut::offer_once(root, read_setting("shortcut_offered") == "1", [] { write_setting("shortcut_offered", "1"); });
+}
+
 // Imports `source` into the program's folder after asking; returns the folder to run ("" if the player cancelled).
 std::string import_or_use(const std::string& source) {
     std::string dest = amg::import_destination();
@@ -955,6 +961,7 @@ std::string import_or_use(const std::string& source) {
     if (answer == IDCANCEL) return "";
     if (answer == IDNO) {
         write_setting("root", source);
+        offer_shortcuts(source);
         return source;
     }
     std::string failed = amg::import_game(source, dest);
@@ -964,6 +971,7 @@ std::string import_or_use(const std::string& source) {
     }
     write_setting("root", dest);
     write_setting("source", source);
+    offer_shortcuts(dest);
     return dest;
 }
 
@@ -1040,6 +1048,17 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdline, int show) {
         }
         if (chosen.empty()) return 0;
         root = chosen;
+        // A copy imported by an earlier version lacks the home screen icon: take it from the original folder if it is still there.
+        std::error_code ec;
+        const std::filesystem::path icon = std::filesystem::u8path(root) / "sce_sys" / "icon0.png";
+        const std::string source = read_setting("source");
+        if (!source.empty() && !std::filesystem::exists(icon, ec)) {
+            const std::filesystem::path from = std::filesystem::u8path(source) / "sce_sys" / "icon0.png";
+            if (std::filesystem::exists(from, ec)) {
+                std::filesystem::create_directories(icon.parent_path(), ec);
+                std::filesystem::copy_file(from, icon, ec);
+            }
+        }
     }
     if (!value_after("--save-dir").empty()) g_save_dir = value_after("--save-dir");
     {
@@ -1063,6 +1082,11 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdline, int show) {
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
     window = CreateWindowW(L"AmagamiPort", L"Amagami (open-amagami port)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
                            CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, inst, nullptr);
+    if (window) {
+        if (HICON big = amg::shortcut::load_game_icon(root, GetSystemMetrics(SM_CXICON))) SendMessageW(window, WM_SETICON, ICON_BIG, LPARAM(big));
+        if (HICON little = amg::shortcut::load_game_icon(root, GetSystemMetrics(SM_CXSMICON)))
+            SendMessageW(window, WM_SETICON, ICON_SMALL, LPARAM(little));
+    }
     ShowWindow(window, show);
     gpu_scene = value_after("--renderer") != "present";
     if (value_after("--renderer") != "software") {

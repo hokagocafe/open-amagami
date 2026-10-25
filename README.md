@@ -54,7 +54,8 @@ when it is fine:
 
 <p align="center"><img src="media/launcher.png" alt="The launcher: every check of the game folder is green" width="520"></p>
 
-**3. Press Start game.** That is all. Next time, just run `amagami.exe` and press Start game.
+**3. Press Start game.** That is all. The first time, the program also offers a shortcut on the desktop and in the Start menu;
+next time, open it from there (or run `amagami.exe`) and press Start game. **Settings → Desktop shortcut** makes them again.
 
 > Windows may say *"Windows protected your PC"* the first time, because the program is new and not signed. Press **More info**, then
 > **Run anyway**.

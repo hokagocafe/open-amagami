@@ -31,21 +31,18 @@ set_target_properties(amagami_vm_cli PROPERTIES OUTPUT_NAME amagami_vm)
 
 if(WIN32)
   # The playable front end: a Win32 window, no other dependency.
-  add_executable(amagami WIN32 src/win_main.cpp src/d3d_present.cpp src/game_import.cpp src/input.cpp src/data_check.cpp src/launcher.cpp)
-  # The program's icon: the game's own if it is there (assets/icon/amagami.ico, made by `tools/hokago.py make_ico`
-  # from assets/icon/game-icon.jpg; assets/ is not tracked, D-012), otherwise our mascot (art/amagami.ico, made the
-  # same way from art/icon.svg rendered at 512 pixels), which is what the public builds carry.
-  set(AMG_ICON "${CMAKE_CURRENT_SOURCE_DIR}/../assets/icon/amagami.ico")
-  if(NOT EXISTS "${AMG_ICON}")
-    set(AMG_ICON "${CMAKE_CURRENT_SOURCE_DIR}/art/amagami.ico")
-  endif()
+  add_executable(amagami WIN32 src/win_main.cpp src/d3d_present.cpp src/game_import.cpp src/input.cpp src/data_check.cpp src/launcher.cpp src/shortcut.cpp)
+  # The program file's icon: our mascot (art/amagami.ico, made by `tools/hokago.py make_ico` from art/icon.svg rendered at
+  # 512 pixels). The windows and the shortcuts show the game's own icon instead, taken from the player's copy at run time
+  # (shortcut.cpp).
+  set(AMG_ICON "${CMAKE_CURRENT_SOURCE_DIR}/art/amagami.ico")
   if(EXISTS "${AMG_ICON}")
     enable_language(RC)
     configure_file(res/amagami.rc.in "${CMAKE_CURRENT_BINARY_DIR}/amagami.rc" @ONLY)
     target_sources(amagami PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/amagami.rc")
     target_compile_definitions(amagami PRIVATE AMG_HAS_ICON=1)
   endif()
-  target_link_libraries(amagami PRIVATE amagami_vm user32 gdi32 winmm shell32 ole32 comctl32 d3d11 dxgi d3dcompiler bcrypt)
+  target_link_libraries(amagami PRIVATE amagami_vm user32 gdi32 winmm shell32 ole32 uuid comctl32 d3d11 dxgi d3dcompiler bcrypt)
   # SDL3, for gamepads only (src/third_party/sdl3/README.md, D-025): the 32-bit library and its DLL next to the program.
   set(AMG_SDL "${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/sdl3")
   if(NOT EXISTS "${AMG_SDL}/lib/x86/SDL3.lib")

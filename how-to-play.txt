@@ -14,7 +14,8 @@ HOW TO PLAY
      Every check turns green when it is fine.
   3. Press "Start game".
 
-Next time, run amagami.exe and press "Start game".
+The first time it offers an "Amagami" shortcut on the desktop and in the Start menu
+(Settings, "Desktop shortcut" makes them again). Next time, open it and press "Start game".
 
 ENGLISH
   If your copy has the English fan translation (v1.1), the game is in English.

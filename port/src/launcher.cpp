@@ -13,6 +13,7 @@
 #include "input.hpp"
 #include "paths.hpp"
 #include "port_settings.hpp"
+#include "shortcut.hpp"
 
 namespace amg::launcher {
 
@@ -21,7 +22,7 @@ namespace {
 constexpr UINT WM_CHECKED = WM_APP + 1;
 enum {
     ID_START = IDOK, ID_QUIT = IDCANCEL, ID_SETTINGS = 10, ID_FOLDER = 11, ID_DELETE = 12, ID_SAVES = 13, ID_CONTROLS = 14,
-    ID_DEFAULTS = 15, ID_ENGLISH = 16, ID_ROW0 = 100, ID_KEY0 = 300
+    ID_DEFAULTS = 15, ID_ENGLISH = 16, ID_SHORTCUT = 17, ID_ROW0 = 100, ID_KEY0 = 300
 };
 
 const COLORREF BACKGROUND = RGB(247, 246, 244), INK = RGB(40, 35, 62), MUTED = RGB(93, 88, 112), GOOD = RGB(46, 150, 90),
@@ -76,6 +77,12 @@ struct Controls {
     std::vector<HWND> keys;
     HWND note = nullptr;
 };
+
+// The game's icon from the player's copy on the title bar and the taskbar (the program's own when the copy has none).
+void set_game_icon(HWND win, const std::string& root) {
+    if (HICON big = shortcut::load_game_icon(root, GetSystemMetrics(SM_CXICON))) SendMessageW(win, WM_SETICON, ICON_BIG, LPARAM(big));
+    if (HICON little = shortcut::load_game_icon(root, GetSystemMetrics(SM_CXSMICON))) SendMessageW(win, WM_SETICON, ICON_SMALL, LPARAM(little));
+}
 
 std::wstring key_text(int vk) { return widen(input::key_name(vk)); }
 
@@ -267,6 +274,10 @@ LRESULT CALLBACK settings_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                     s->data_changed = true;  // the launcher checks again (the Language line)
                     DestroyWindow(hwnd);     // reopened, the Language row lists the new layer
                 }
+            } else if (id == ID_SHORTCUT) {
+                const std::string failed = shortcut::create(s->root);
+                MessageBoxW(hwnd, failed.empty() ? L"Amagami is now on the desktop and in the Start menu." : widen(failed).c_str(), L"Amagami",
+                            MB_OK | (failed.empty() ? MB_ICONINFORMATION : MB_ICONWARNING));
             } else if (id == ID_CONTROLS && s) {
                 show_controls(hwnd, HINSTANCE(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE)), *s->svc, s->body);
             } else if (id == ID_FOLDER && s) {
@@ -346,7 +357,7 @@ bool show_settings(HWND parent, HINSTANCE inst, const Services& svc, const std::
         entries.push_back(std::move(e));
     }
     const int row_h = 34, top = 20, width = 500;
-    const int height = top + int(entries.size()) * row_h + 120;
+    const int height = top + int(entries.size()) * row_h + 160;
     RECT rc = {0, 0, width, height};
     AdjustWindowRect(&rc, WS_CAPTION | WS_SYSMENU, FALSE);
     HWND win = CreateWindowW(L"AmagamiSettings", L"Settings", WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
@@ -375,7 +386,8 @@ bool show_settings(HWND parent, HINSTANCE inst, const Services& svc, const std::
     make_button(win, L"Controls...", ID_CONTROLS, 358, y, 118, 30, body);
     make_button(win, L"Delete copy of the game...", ID_DELETE, 24, y + 40, 200, 30, body);
     make_button(win, L"Add English patch...", ID_ENGLISH, 234, y + 40, 122, 30, body);
-    make_button(win, L"Close", ID_QUIT, width - 24 - 110, y + 40, 110, 30, body, true);
+    make_button(win, L"Desktop shortcut", ID_SHORTCUT, 24, y + 80, 200, 30, body);
+    make_button(win, L"Close", ID_QUIT, width - 24 - 110, y + 80, 110, 30, body, true);
     (void)bold;
     EnableWindow(parent, FALSE);
     pump(win, s.closed);
@@ -576,6 +588,7 @@ std::string run(HINSTANCE inst, const std::string& root, const Services& service
     l.win = CreateWindowW(L"AmagamiLauncher", L"Amagami", WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
                           rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, inst, nullptr);
     SetWindowLongPtrW(l.win, GWLP_USERDATA, LONG_PTR(&l));
+    set_game_icon(l.win, root);
     centre_on_screen(l.win);
     const int by = height - 24 - 36;
     make_button(l.win, L"Choose game folder...", ID_FOLDER, 24, by, 176, 36, l.body);
