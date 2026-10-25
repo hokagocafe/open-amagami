@@ -35,6 +35,7 @@
 #include "d3d_present.hpp"
 #include "data_check.hpp"
 #include "shortcut.hpp"
+#include "update_check.hpp"
 #include "datapath.hpp"
 #include "game_import.hpp"
 #include "input.hpp"
@@ -48,6 +49,16 @@
 #include "vm.hpp"
 
 using namespace amg;
+
+namespace {
+
+// The rates and frame counter in the title bar are for development: a release shows only the name, unless AMG_STATS=1.
+bool show_stats() {
+    static const bool on = std::getenv("AMG_STATS") ? std::getenv("AMG_STATS")[0] == '1' : std::string(amg::update_check::current()) == "dev";
+    return on;
+}
+
+}  // namespace
 
 namespace {
 
@@ -424,7 +435,7 @@ void draw_thread() {
                 std::snprintf(title, sizeof title,
                               "Amagami (open-amagami port) - game %.1f fps, shown %.1f fps, gpu scene, input: %s, frame %lld",
                               sim_fps.load(), shown_fps, amg::input::describe().c_str(), latest_tick.load());
-                SetWindowTextA(window, title);
+                if (show_stats()) SetWindowTextA(window, title);
                 draw_total = 0.0;
                 shown = 0;
             }
@@ -455,7 +466,7 @@ void draw_thread() {
             sim_worst_ms = 0.0;
             draw_total = 0.0;
             shown = 0;
-            SetWindowTextA(window, title);
+            if (show_stats()) SetWindowTextA(window, title);
         }
     }
 }
@@ -1096,7 +1107,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdline, int show) {
     amg::use_screen_of(root);
     RECT rc = {0, 0, SCREEN_W * scale, SCREEN_H * scale};
     AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
-    window = CreateWindowW(L"AmagamiPort", L"Amagami (open-amagami port)", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
+    window = CreateWindowW(L"AmagamiPort", L"Amagami", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
                            CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top, nullptr, nullptr, inst, nullptr);
     if (window) {
         if (HICON big = amg::shortcut::load_game_icon(root, GetSystemMetrics(SM_CXICON))) SendMessageW(window, WM_SETICON, ICON_BIG, LPARAM(big));
