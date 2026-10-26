@@ -112,12 +112,27 @@ std::vector<Check> check_data(const std::string& root) {
         return out;
     }
     out.push_back({Check::Ok, "Decrypted copy", "The archives and the executable are readable."});
-    // 3. The sound files: without them the game plays silent, so a warning.
+    // 3. The sound sources the engine can actually read, either packed or prepared.
     std::string quiet;
-    for (const char* rel : {"sound/VOICE.CPK", "sound/VOICE.IDX", "sound/MUSIC.CPK", "sound/SOUND.CPK", "sound/SYSSE0.ACB", "sound/SYSSE1.ACB"})
-        if (!std::filesystem::exists(data_file(root, rel), ec)) quiet += std::string(quiet.empty() ? "" : ", ") + rel;
+    const auto has_file = [&](const char* rel) {
+        return std::filesystem::is_regular_file(data_file(root, rel), ec);
+    };
+    const bool voices = has_file("sound/VOICE.IDX") &&
+                        (has_file("sound/VOICE.CPK") || has_vita_voice_files(root + "/sound/voice") ||
+                         has_vita_voice_files(root + "/extracted/sound/voice"));
+    if (!voices) quiet += std::string(quiet.empty() ? "" : ", ") + "voices";
+    if (!has_file("sound/MUSIC.CPK") && !has_vita_wav_files(root, "music"))
+        quiet += std::string(quiet.empty() ? "" : ", ") + "music";
+    if (!has_file("sound/SOUND.CPK") && !has_vita_wav_files(root, "ambience"))
+        quiet += std::string(quiet.empty() ? "" : ", ") + "ambience";
+    for (int bank = 0; bank < 2; ++bank) {
+        const std::string acb = "sound/SYSSE" + std::to_string(bank) + ".ACB";
+        const std::string wav_dir = root + "/extracted/sound_wav/se" + std::to_string(bank);
+        if (!has_file(acb.c_str()) && !has_regular_file_with_extension(wav_dir, ".wav"))
+            quiet += std::string(quiet.empty() ? "" : ", ") + "sound effects (bank " + std::to_string(bank) + ")";
+    }
     if (quiet.empty()) out.push_back({Check::Ok, "Sound", "Voices, music and sound effects are there."});
-    else out.push_back({Check::Warn, "Sound", "Missing: " + quiet + ". The game will run with parts of the sound missing."});
+    else out.push_back({Check::Warn, "Sound", "Missing readable sources: " + quiet + ". The game will run with parts of the sound missing."});
     // 4. The version: the hashes of the small files against the known dumps. An unknown one is a warning only.
     const auto known = read_known();
     if (known.empty()) {

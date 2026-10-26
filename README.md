@@ -38,8 +38,8 @@ gamepad, the keyboard or the mouse. It is a new program that reads the game's ow
 ## What you need
 
 - A PC with **Windows 10 or 11**.
-- **Your own copy of *Amagami ebKore+* for PS Vita** (`PCSG00291`) as a folder of files, the kind a PS Vita dump tool makes. It has
-  to be the readable (decrypted) kind; the program checks it and tells you. It cannot make or fix one for you.
+- **Your own copy of *Amagami ebKore+* for PS Vita** (`PCSG00291`) as a decrypted folder, or a Vita3K export with `app/PCSG00291`.
+  It has to be readable; the program checks it and tells you. It cannot make or fix one for you.
 
 Nothing has to be installed: no runtimes, no emulator.
 
@@ -49,11 +49,14 @@ Nothing has to be installed: no runtimes, no emulator.
 above, then right-click it, choose *Extract All...* and pick any folder (your Desktop is fine).
 
 **2. Start `amagami.exe` and choose your game.** The launcher opens. Press **Choose game folder...**, pick the folder of your copy (the
-one with `AMAGAMI.IMG` and `SCENARIO.CPK` inside, plus `eboot.bin` or `extracted/eboot_decrypted.elf`) and answer **Yes** to copy it
-into the program's own folder. Each required check turns green when it is fine; the version check can be a warning for an unlisted
-build:
+one with `AMAGAMI.IMG` and `SCENARIO.CPK` inside, plus `eboot.bin` or `extracted/eboot_decrypted.elf`), or a Vita3K export folder
+containing `app/PCSG00291` and optionally `patch/PCSG00291`. Answer **Yes** to copy it into the program's own folder. Each required
+check turns green when it is fine; the version check can be a warning for an unlisted build:
 
 <p align="center"><img src="media/launcher.png" alt="The launcher: every check of the game folder is green" width="520"></p>
+
+The sound check accepts packed archives or extracted voices and prepared audio. If music, ambience or sound effects are absent, it
+names the missing categories; some decrypted folders contain only part of the game's sound data.
 
 **3. Press Start game.** That is all. The first time, the program also offers a shortcut on the desktop and in the Start menu;
 next time, open it from there (or run `amagami.exe`) and press Start game. **Settings → Desktop shortcut** makes them again.

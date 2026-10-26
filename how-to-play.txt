@@ -3,8 +3,11 @@ open-amagami - play Amagami (PS Vita) on Windows from your own copy
 
 You need your own copy of Amagami ebKore+ for PS Vita (PCSG00291), as a folder
 of decrypted files (AMAGAMI.IMG, SCENARIO.CPK, and either eboot.bin or
-extracted\eboot_decrypted.elf).
+extracted\eboot_decrypted.elf), or the Vita3K export root with app\PCSG00291.
 Nothing of the game is in this download.
+
+The sound check accepts packed archives or extracted voices and prepared audio.
+It warns which categories are missing; some folders do not include all of the game's sound data.
 
 HOW TO PLAY
 

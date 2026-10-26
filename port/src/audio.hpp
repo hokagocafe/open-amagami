@@ -152,9 +152,9 @@ private:
     std::shared_ptr<std::vector<int16_t>> voice_pcm(int speaker, int number);
     std::shared_ptr<std::string> voice_slp(int speaker, int number);
     bool voice_file(int speaker, int number, int kind, std::string& out);
-    int vita_voice_index(int speaker, int number, int kind) const;
+    int vita_voice_index(int speaker, int number, int kind, bool* patched = nullptr) const;
     Afs voice_afs_;
-    std::vector<uint16_t> voice_idx_;
+    std::vector<uint16_t> voice_idx_, vita_voice_patch_idx_;
     std::vector<std::vector<std::pair<uint32_t, uint32_t>>> voice_tables_;  // per speaker, inner AFS table
     std::vector<std::pair<int, std::shared_ptr<std::vector<int16_t>>>> voice_cache_;  // key speaker<<16|number
     std::mutex voice_mutex_;  // guards the archives and the cache (decoding runs outside mutex_)
@@ -175,14 +175,16 @@ private:
     std::string vita_music_dir_, vita_ambience_dir_, vita_voice_dir_;
     // The voices straight from sound/VOICE.CPK (one archive per speaker, read when a line is first needed), used when
     // the prepared `sound/voice` folder is not there. Called with voice_mutex_ held.
-    std::string vita_voice_cpk_, vita_music_cpk_, vita_ambience_cpk_;
+    std::string vita_voice_cpk_, vita_voice_patch_cpk_, vita_music_cpk_, vita_ambience_cpk_;
     std::vector<CpkEntry> vita_music_entries_, vita_ambience_entries_;
     // A music or ambience track: the converted `sound_wav` file if it is there, else the ATRAC9 file in its CPK.
     std::shared_ptr<AdxStream> vita_track(const std::string& wav_dir, const std::string& cpk,
                                           std::vector<CpkEntry>& entries, int index);
     std::vector<CpkEntry> vita_voice_outer_;
     std::map<int, std::vector<CpkEntry>> vita_voice_inner_;
-    bool vita_voice_file(int speaker, int index, std::string& out);
+    std::vector<CpkEntry> vita_voice_patch_outer_;
+    std::map<int, std::vector<CpkEntry>> vita_voice_patch_inner_;
+    bool vita_voice_file(int speaker, int index, std::string& out, bool patched = false);
 };
 
 void install_audio(VM& vm, AudioEngine* engine);

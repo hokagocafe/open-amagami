@@ -2,7 +2,13 @@
 
 **[open-amagami-windows-x86.zip](https://github.com/hokagocafe/open-amagami/releases/download/TAG/open-amagami-windows-x86.zip)** (in *Assets* below), for Windows 10 and 11. Nothing else to install.
 
-You need **your own copy** of *Amagami ebKore+* for PS Vita (`PCSG00291`), as a decrypted folder of files. The launcher accepts `eboot.bin` or a prepared `extracted/eboot_decrypted.elf`. Nothing of the game is in this download.
+You need **your own copy** of *Amagami ebKore+* for PS Vita (`PCSG00291`), as a decrypted folder of files, or a Vita3K export containing `app/PCSG00291`. The launcher accepts `eboot.bin` or a prepared `extracted/eboot_decrypted.elf`. Nothing of the game is in this download.
+
+## What's new
+
+- The launcher and importer recognize Vita3K exports with an optional `patch/PCSG00291` overlay.
+- Audio checks accept packed files, extracted voices and prepared WAVs; missing sound categories are named instead of treating every layout as broken.
+- The port reads the Vita3K app executable for its engine tables and applies mapped voice entries from `VOICE_P.CPK` when present.
 
 ## How to play
 

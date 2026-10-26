@@ -182,16 +182,6 @@ bool vita_gxt_layout(const std::string& name, std::string& ext, int& width, bool
     return false;
 }
 
-// eboot.bin's own ELF layout (F4-34): two LOAD segments, no others needed for the static tables
-// this port reads. Not the PS2's VRAM/FILE_OFFSET convention — Vita addresses map through here.
-size_t vita_va_to_off(uint32_t va) {
-    constexpr uint32_t CODE_OFF = 0xe0, CODE_VA = 0x81000000, CODE_SIZE = 0xc9024;
-    constexpr uint32_t DATA_OFF = 0xc9120, DATA_VA = 0x810ca000, DATA_SIZE = 0x15b14;
-    if (va >= CODE_VA && va < CODE_VA + CODE_SIZE) return CODE_OFF + (va - CODE_VA);
-    if (va >= DATA_VA && va < DATA_VA + DATA_SIZE) return DATA_OFF + (va - DATA_VA);
-    throw std::runtime_error("vita: address not in a known eboot.bin segment");
-}
-
 // --- PNG output: stored deflate blocks, so no compressor is needed -------------------------------
 
 uint32_t crc_table_entry(uint32_t n) {
@@ -1181,7 +1171,7 @@ Graphics::Graphics(VM& v) : vm(v) {
 }
 
 std::string Graphics::exe_string(uint32_t address) const {
-    size_t start = vita ? vita_va_to_off(address) : size_t(address - VRAM + FILE_OFFSET);
+    size_t start = vita ? amg::vita_va_to_off(exe, address, "string") : size_t(address - VRAM + FILE_OFFSET);
     size_t end = exe.find('\0', start);
     return exe.substr(start, end - start);
 }
@@ -1209,7 +1199,7 @@ int Graphics::ui_entry(int64_t texture, int64_t variant) const {
     constexpr uint32_t TEXTURES = 0x810ddf94, TEXTURE_COUNT = 337;
     constexpr uint32_t RECORDS = 0x810ac158, RECORD_COUNT = 762;
     if (!vita || texture < 0 || texture >= TEXTURE_COUNT) return 0;
-    auto word = [this](uint32_t va) { return le32(exe, vita_va_to_off(va)); };
+    auto word = [this](uint32_t va) { return le32(exe, amg::vita_va_to_off(exe, va, "texture table")); };
     uint32_t variants = word(TEXTURES + 4 * uint32_t(texture));
     auto record_at = [&](int64_t v) -> uint32_t {
         if (v < 0 || v > 255) return 0;
@@ -1228,7 +1218,7 @@ const uint8_t* Graphics::ui_pixels(int entry, uint32_t& w, uint32_t& h, uint32_t
     constexpr uint32_t SIZES = 0x810adf44;  // per entry: flag, width, height, pitch
     if (entry <= 0) return nullptr;
     if (sysgraph.empty() && !read_file("system/sysgraph.tm2", sysgraph)) return nullptr;
-    auto word = [this](uint32_t va) { return le32(exe, vita_va_to_off(va)); };
+    auto word = [this](uint32_t va) { return le32(exe, amg::vita_va_to_off(exe, va, "texture sizes")); };
     uint32_t start = le32(sysgraph, 4 * size_t(entry));
     w = word(SIZES + 16 * uint32_t(entry) + 4);
     h = word(SIZES + 16 * uint32_t(entry) + 8);
@@ -1270,7 +1260,8 @@ uint32_t Graphics::exe_word(uint32_t addr) const {
         {0x28AB98, 0x810ADC24, 0x1A0},  // node icons, hexagons
     };
     for (const auto& t : tables)
-        if (addr >= t.ps2 && addr + 4 <= t.ps2 + t.size) return le32(exe, vita_va_to_off(t.vita + (addr - t.ps2)));
+        if (addr >= t.ps2 && addr + 4 <= t.ps2 + t.size)
+            return le32(exe, amg::vita_va_to_off(exe, t.vita + (addr - t.ps2), "engine table"));
     return 0;
 }
 
@@ -1671,7 +1662,7 @@ int64_t Graphics::new_background(int64_t place, int64_t scene, int64_t mob, int6
         // interface view (origin 0) instead of the world's: the map's frame (200), the menus' pictures (139 to 149,
         // 207 to 216...). Event pictures are always in the world view (0x81009964). Not done yet: the interface view's
         // scale is 1 on the Vita, while the port scales every picture by the screen scale (only differs at 0.775).
-        size_t at = vita_va_to_off(0x810A8660 + uint32_t(place));
+        size_t at = amg::vita_va_to_off(exe, 0x810A8660 + uint32_t(place), "place table");
         if (at < exe.size() && exe[at] != 0) obj->follow = 0.0;
     }
     return add(std::move(obj));
@@ -1885,10 +1876,10 @@ void Graphics::actor_files(int64_t character, int64_t cloth, int64_t pose, std::
         // appended; the files are stem + "x"
         // (picture) and stem + "z.zb" (face layout), as on the PS2.
         constexpr uint32_t TABLE_A = 0x810ac0b2, TABLE_B = 0x810ca9cc, GROUP = 264, OUTFIT_STRIDE = 12;
-        size_t at = vita_va_to_off(uint32_t(TABLE_A + 2 * uint32_t(character)));
+        size_t at = amg::vita_va_to_off(exe, uint32_t(TABLE_A + 2 * uint32_t(character)), "character table");
         uint32_t row = le16(exe, at);
         uint32_t index = row * GROUP + uint32_t(pose) * OUTFIT_STRIDE + uint32_t(cloth);
-        size_t entry = vita_va_to_off(uint32_t(TABLE_B + 8 * index));
+        size_t entry = amg::vita_va_to_off(exe, uint32_t(TABLE_B + 8 * index), "character entry");
         uint32_t b = le32(exe, entry), f = le32(exe, entry + 4);
         if (b) body = "body/" + exe_string(b);
         if (f) face = "face/" + exe_string(f);

@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <vector>
 
 #include "datapath.hpp"
@@ -27,28 +28,38 @@ struct Item {
 // What the port reads: the three data files, the executable, and everything in `sound/`.
 std::vector<Item> plan(const std::string& src) {
     std::vector<Item> items;
+    std::set<std::string> destinations;
     std::error_code ec;
     auto add = [&](const std::string& from, const std::string& to) {
-        if (!fs::exists(from, ec)) return;
+        if (!fs::is_regular_file(from, ec) || !destinations.insert(to).second) return;
         Item it;
         it.from = from;
         it.to = to;
         it.size = uint64_t(fs::file_size(from, ec));
         items.push_back(std::move(it));
     };
+    auto add_tree = [&](const std::string& folder, const std::string& destination) {
+        if (!fs::is_directory(folder, ec)) return;
+        for (fs::recursive_directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
+            if (!it->is_regular_file(ec)) continue;
+            const std::string relative = it->path().lexically_relative(folder).generic_string();
+            add(it->path().string(), destination + relative);
+        }
+    };
     add(data_file(src, "AMAGAMI.IMG"), "AMAGAMI.IMG");
     add(data_file(src, "SCENARIO.CPK"), "SCENARIO.CPK");
     add(data_file(src, "graph/GRAPH.CPK"), "graph/GRAPH.CPK");
-    if (fs::exists(src + "/eboot.bin", ec)) add(src + "/eboot.bin", "eboot.bin");
-    else add(src + "/extracted/eboot_decrypted.elf", "extracted/eboot_decrypted.elf");
-    add(src + "/sce_sys/icon0.png", "sce_sys/icon0.png");  // the home screen icon: the shortcuts and windows use it
-    for (const char* dir : {"/sound", "/extracted/sound"}) {
-        std::string folder = src + dir;
-        if (!fs::is_directory(folder, ec)) continue;
-        for (const auto& e : fs::directory_iterator(folder, ec))
-            if (e.is_regular_file(ec)) add(e.path().string(), std::string("sound/") + e.path().filename().string());
-        break;
+    const std::string executable = vita_exe_file(src);
+    if (!executable.empty()) {
+        const bool prepared = fs::path(executable).filename() == "eboot_decrypted.elf";
+        add(executable, prepared ? "extracted/eboot_decrypted.elf" : "eboot.bin");
     }
+    add(data_file(src, "sce_sys/icon0.png"), "sce_sys/icon0.png");  // the home screen icon: the shortcuts and windows use it
+    add_tree(src + "/patch/PCSG00291/sound", "sound/");
+    add_tree(src + "/app/PCSG00291/sound", "sound/");
+    add_tree(src + "/sound", "sound/");
+    add_tree(src + "/extracted/sound", "sound/");
+    add_tree(src + "/extracted/sound_wav", "extracted/sound_wav/");
     return items;
 }
 

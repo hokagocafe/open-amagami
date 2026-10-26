@@ -621,10 +621,8 @@ AudioEngine::AudioEngine(const std::string& root) : root_(root) {
         // table lookup two calls up the chain. 145 entries, -1 (and garbage past the 145th) for none.
         std::string exe = amg::vita_exe(root);
         {
-            // The table sits in the code segment (file offset 0xe0, VA 0x81000000; see
-            // port/src/gfx.cpp's vita_va_to_off for the full segment layout).
-            constexpr uint32_t CODE_OFF = 0xe0, CODE_VA = 0x81000000, TABLE_VA = 0x810a818c;
-            size_t at = CODE_OFF + (TABLE_VA - CODE_VA);
+            constexpr uint32_t TABLE_VA = 0x810a818c;
+            size_t at = amg::vita_va_to_off(exe, TABLE_VA, "music table");
             for (int i = 0; i < 145 && at + 4 <= exe.size(); ++i, at += 4) {
                 const unsigned char* b = reinterpret_cast<const unsigned char*>(exe.data()) + at;
                 track_table_.push_back(int32_t(uint32_t(b[0]) | (uint32_t(b[1]) << 8) | (uint32_t(b[2]) << 16) |
@@ -634,16 +632,23 @@ AudioEngine::AudioEngine(const std::string& root) : root_(root) {
         // The voices as VOICE.CPK holds them (one folder per speaker of its inner archives, files by index: HCA
         // lines and their lip-sync tracks), decoded when a line is first needed. AMG_VITA_VOICE_DIR moves them.
         const char* voice_dir = std::getenv("AMG_VITA_VOICE_DIR");
-        vita_voice_dir_ = voice_dir && *voice_dir ? std::string(voice_dir) : root + "/extracted/sound/voice";
+        vita_voice_dir_ = voice_dir && *voice_dir ? std::string(voice_dir) : amg::vita_voice_directory(root);
         vita_voice_cpk_ = amg::data_file(root, "sound/VOICE.CPK");
+        vita_voice_patch_cpk_ = amg::data_file(root, "sound/VOICE_P.CPK");
         // VOICE.IDX (speaker, line) -> an index into that speaker's own archive is confirmed
         // byte-identical between the PS2 and Vita releases (F4-41, vita-cpk-format.md) — same file,
         // reused as-is. It maps directly onto the Vita per-speaker CPKs' sequential file IDs (checked
         // against speaker 0: 73 indices, 0 to 72, no gaps, matching Voice00.cpk's 73 files exactly).
-        std::ifstream idx(amg::data_file(root, "sound/VOICE.IDX"), std::ios::binary);
-        std::string raw((std::istreambuf_iterator<char>(idx)), std::istreambuf_iterator<char>());
-        for (size_t i = 0; i + 1 < raw.size(); i += 2)
-            voice_idx_.push_back(uint16_t(uint8_t(raw[i]) | (uint8_t(raw[i + 1]) << 8)));
+        auto read_voice_index = [](const std::string& path) {
+            std::vector<uint16_t> index;
+            std::ifstream idx(path, std::ios::binary);
+            std::string raw((std::istreambuf_iterator<char>(idx)), std::istreambuf_iterator<char>());
+            for (size_t i = 0; i + 1 < raw.size(); i += 2)
+                index.push_back(uint16_t(uint8_t(raw[i]) | (uint8_t(raw[i + 1]) << 8)));
+            return index;
+        };
+        voice_idx_ = read_voice_index(amg::data_file(root, "sound/VOICE.IDX"));
+        vita_voice_patch_idx_ = read_voice_index(amg::data_file(root, "sound/VOICE_P.IDX"));
         music_voice_.gain = 1.0;
         ambience_voice_.gain = 1.0;
         se_load(0);  // as below: the first effect bank, loaded from the start
@@ -859,10 +864,11 @@ std::shared_ptr<std::vector<int16_t>> AudioEngine::voice_pcm(int speaker, int nu
         if (k == key) return pcm;
     auto pcm = std::make_shared<std::vector<int16_t>>();
     if (vita_) {
-        int index = vita_voice_index(speaker, number, 1);
+        bool patched = false;
+        int index = vita_voice_index(speaker, number, 1, &patched);
         if (index < 0) return nullptr;
         std::string file;
-        if (!vita_voice_file(speaker, index, file)) return nullptr;
+        if (!vita_voice_file(speaker, index, file, patched)) return nullptr;
         int rate = 0, channels = 0;
         if (!decode_hca(file, *pcm, rate, channels) || channels != 1) return nullptr;
     } else {
@@ -876,10 +882,10 @@ std::shared_ptr<std::vector<int16_t>> AudioEngine::voice_pcm(int speaker, int nu
     return pcm;
 }
 
-bool AudioEngine::vita_voice_file(int speaker, int index, std::string& out) {
+bool AudioEngine::vita_voice_file(int speaker, int index, std::string& out, bool patched) {
     char path[64];
     std::snprintf(path, sizeof path, "/speaker_%02d/%05d.bin", speaker, index);
-    {
+    if (!patched) {
         std::ifstream f(vita_voice_dir_ + path, std::ios::binary);
         if (f) {
             out.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -887,16 +893,19 @@ bool AudioEngine::vita_voice_file(int speaker, int index, std::string& out) {
         }
     }
     std::error_code ec;
-    if (vita_voice_cpk_.empty() || !std::filesystem::exists(vita_voice_cpk_, ec)) return false;
+    const std::string& cpk = patched ? vita_voice_patch_cpk_ : vita_voice_cpk_;
+    if (cpk.empty() || !std::filesystem::is_regular_file(cpk, ec)) return false;
     try {
-        if (vita_voice_outer_.empty()) vita_voice_outer_ = cpk_read_entries(vita_voice_cpk_);
-        if (speaker < 0 || size_t(speaker) >= vita_voice_outer_.size()) return false;
-        auto it = vita_voice_inner_.find(speaker);
-        if (it == vita_voice_inner_.end())
-            it = vita_voice_inner_.emplace(speaker, cpk_read_entries(vita_voice_cpk_, vita_voice_outer_[size_t(speaker)].offset)).first;
+        auto& outer = patched ? vita_voice_patch_outer_ : vita_voice_outer_;
+        auto& inner = patched ? vita_voice_patch_inner_ : vita_voice_inner_;
+        if (outer.empty()) outer = cpk_read_entries(cpk);
+        if (speaker < 0 || size_t(speaker) >= outer.size()) return false;
+        auto it = inner.find(speaker);
+        if (it == inner.end())
+            it = inner.emplace(speaker, cpk_read_entries(cpk, outer[size_t(speaker)].offset)).first;
         if (index < 0 || size_t(index) >= it->second.size()) return false;
         const CpkEntry& e = it->second[size_t(index)];
-        std::ifstream f(vita_voice_cpk_, std::ios::binary);
+        std::ifstream f(cpk, std::ios::binary);
         if (!f) return false;
         f.seekg(std::streamoff(e.offset));
         out.assign(size_t(e.size), '\0');
@@ -916,9 +925,10 @@ std::shared_ptr<std::string> AudioEngine::voice_slp(int speaker, int number) {
         int key = (speaker << 16) | number;
         for (auto& [k, cached] : cache)
             if (k == key) return cached;
-        int index = vita_voice_index(speaker, number, 0);
+        bool patched = false;
+        int index = vita_voice_index(speaker, number, 0, &patched);
         if (index < 0) return nullptr;
-        if (!vita_voice_file(speaker, index, *slp)) return nullptr;
+        if (!vita_voice_file(speaker, index, *slp, patched)) return nullptr;
         if (cache.size() >= 32) cache.erase(cache.begin());
         cache.emplace_back(key, slp);
         return slp;
@@ -929,13 +939,25 @@ std::shared_ptr<std::string> AudioEngine::voice_slp(int speaker, int number) {
 
 // VOICE.IDX, (speaker, line, kind) -> index into the speaker's own archive; kind 0 is the line's
 // lip-sync track, 1 its audio. -1 when the line has none.
-int AudioEngine::vita_voice_index(int speaker, int number, int kind) const {
+int AudioEngine::vita_voice_index(int speaker, int number, int kind, bool* patched) const {
     if (speaker < 0 || speaker >= 16 || number < 0 || number >= 10000) return -1;
     size_t group_at = size_t(speaker) * 100 + size_t(number / 100);
-    if (group_at >= voice_idx_.size() || voice_idx_[group_at] == 0xFFFF) return -1;
-    size_t file_at = 1600 + size_t(voice_idx_[group_at]) * 200 + size_t(number % 100) * 2 + size_t(kind);
-    if (file_at >= voice_idx_.size() || voice_idx_[file_at] == 0xFFFF) return -1;
-    return voice_idx_[file_at];
+    const auto lookup = [group_at, number, kind](const std::vector<uint16_t>& index) {
+        if (group_at >= index.size() || index[group_at] == 0xFFFF) return -1;
+        size_t file_at = 1600 + size_t(index[group_at]) * 200 + size_t(number % 100) * 2 + size_t(kind);
+        if (file_at >= index.size() || index[file_at] == 0xFFFF) return -1;
+        return int(index[file_at]);
+    };
+    std::error_code ec;
+    if (!vita_voice_patch_idx_.empty() && std::filesystem::is_regular_file(vita_voice_patch_cpk_, ec)) {
+        const int patch_index = lookup(vita_voice_patch_idx_);
+        if (patch_index >= 0) {
+            if (patched) *patched = true;
+            return patch_index;
+        }
+    }
+    if (patched) *patched = false;
+    return lookup(voice_idx_);
 }
 
 void AudioEngine::voice_prepare(int speaker, int number) {
