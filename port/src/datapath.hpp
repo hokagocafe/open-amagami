@@ -40,6 +40,17 @@ inline bool is_vita(const std::string& root) {
     return std::filesystem::exists(data_file(root, "graph/GRAPH.CPK"), ec);
 }
 
+inline std::string vita_exe_file(const std::string& root) {
+    std::error_code ec;
+    const std::string prepared = root + "/extracted/eboot_decrypted.elf";
+    if (std::filesystem::is_regular_file(prepared, ec) && std::filesystem::file_size(prepared, ec) > 0 && !ec)
+        return prepared;
+    ec.clear();
+    const std::string raw = root + "/eboot.bin";
+    if (std::filesystem::is_regular_file(raw, ec) && std::filesystem::file_size(raw, ec) > 0 && !ec) return raw;
+    return "";
+}
+
 // The Vita executable as a plain ELF image: the prepared `eboot_decrypted.elf` if there is one, else `eboot.bin`
 // unwrapped in memory. A retail eboot has encrypted segments (flag 1) and cannot be read; a copy whose segments are
 // plain (flag 2, as the owner's decrypted package has) is the ELF's own bytes in Sony's SELF container, so the
@@ -50,11 +61,13 @@ inline std::string vita_exe(const std::string& root) {
         std::ifstream f(path, std::ios::binary);
         return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     };
-    std::string elf = slurp(root + "/extracted/eboot_decrypted.elf");
-    if (!elf.empty()) return elf;
-    std::string self = slurp(root + "/eboot.bin");
+    const std::string path = vita_exe_file(root);
+    if (path.empty()) throw std::runtime_error("no eboot.bin (or extracted/eboot_decrypted.elf) in " + root);
+    std::string elf = slurp(path);
+    if (path == root + "/extracted/eboot_decrypted.elf") return elf;
+    std::string self = std::move(elf);
     if (self.size() < 0x80 || std::memcmp(self.data(), "SCE\0", 4) != 0)
-        throw std::runtime_error("no eboot.bin (or eboot_decrypted.elf) in " + root);
+        throw std::runtime_error("eboot.bin has an unexpected header");
     auto u64 = [&](size_t at) {
         uint64_t v;
         std::memcpy(&v, self.data() + at, 8);

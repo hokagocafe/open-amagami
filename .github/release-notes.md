@@ -2,12 +2,12 @@
 
 **[open-amagami-windows-x86.zip](https://github.com/hokagocafe/open-amagami/releases/download/TAG/open-amagami-windows-x86.zip)** (in *Assets* below), for Windows 10 and 11. Nothing else to install.
 
-You need **your own copy** of *Amagami ebKore+* for PS Vita (`PCSG00291`), as a decrypted folder of files. Nothing of the game is in this download.
+You need **your own copy** of *Amagami ebKore+* for PS Vita (`PCSG00291`), as a decrypted folder of files. The launcher accepts `eboot.bin` or a prepared `extracted/eboot_decrypted.elf`. Nothing of the game is in this download.
 
 ## How to play
 
 1. Unpack the zip anywhere (right-click, *Extract All...*).
-2. Run `amagami.exe`, press **Choose game folder...** and pick the folder of your copy. Let it copy the game; the checks turn green.
+2. Run `amagami.exe`, press **Choose game folder...** and pick the folder of your copy. Let it copy the game; required checks must pass. An unlisted version may show a warning.
 3. Press **Start game**.
 
 Windows may warn that the program is not recognised: press **More info**, then **Run anyway**.

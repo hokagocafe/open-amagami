@@ -92,11 +92,14 @@ std::vector<Check> check_data(const std::string& root) {
     // 1. The data files.
     std::string missing;
     uintmax_t total = 0;
-    for (const char* rel : {"AMAGAMI.IMG", "SCENARIO.CPK", "graph/GRAPH.CPK", "eboot.bin"}) {
+    for (const char* rel : {"AMAGAMI.IMG", "SCENARIO.CPK", "graph/GRAPH.CPK"}) {
         const std::string path = data_file(root, rel);
         if (!std::filesystem::exists(path, ec)) missing += std::string(missing.empty() ? "" : ", ") + rel;
         else total += std::filesystem::file_size(path, ec);
     }
+    const std::string executable_path = vita_exe_file(root);
+    if (executable_path.empty()) missing += std::string(missing.empty() ? "" : ", ") + "eboot.bin or extracted/eboot_decrypted.elf";
+    else total += std::filesystem::file_size(executable_path, ec);
     if (!missing.empty()) {
         out.push_back({Check::Fail, "Game data", "Missing: " + missing + ". Choose the folder of the PS Vita version (PCSG00291)."});
         return out;
@@ -123,14 +126,17 @@ std::vector<Check> check_data(const std::string& root) {
     }
     int matched = 0, unknown = 0;
     std::string image_label;  // the label of AMAGAMI.IMG: it says the language of the data
-    for (const char* rel : {"AMAGAMI.IMG", "SCENARIO.CPK", "eboot.bin"}) {
-        const std::string hash = sha256_file(data_file(root, rel));
+    const std::string version_paths[] = {data_file(root, "AMAGAMI.IMG"), data_file(root, "SCENARIO.CPK"), executable_path};
+    const std::string version_names[] = {"AMAGAMI.IMG", "SCENARIO.CPK", std::filesystem::path(executable_path).filename().string()};
+    for (size_t i = 0; i < 3; ++i) {
+        const std::string& name = version_names[i];
+        const std::string hash = sha256_file(version_paths[i]);
         bool hit = false;
         auto range = known.equal_range(hash);
         for (auto it = range.first; it != range.second; ++it)
-            if (it->second.file == rel) {
+            if (it->second.file == name) {
                 hit = true;
-                if (std::string(rel) == "AMAGAMI.IMG") image_label = it->second.label;
+                if (name == "AMAGAMI.IMG") image_label = it->second.label;
             }
         (hit ? matched : unknown)++;
     }

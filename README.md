@@ -49,8 +49,9 @@ Nothing has to be installed: no runtimes, no emulator.
 above, then right-click it, choose *Extract All...* and pick any folder (your Desktop is fine).
 
 **2. Start `amagami.exe` and choose your game.** The launcher opens. Press **Choose game folder...**, pick the folder of your copy (the
-one with `AMAGAMI.IMG` and `SCENARIO.CPK` inside) and answer **Yes** to copy it into the program's own folder. Each line turns green
-when it is fine:
+one with `AMAGAMI.IMG` and `SCENARIO.CPK` inside, plus `eboot.bin` or `extracted/eboot_decrypted.elf`) and answer **Yes** to copy it
+into the program's own folder. Each required check turns green when it is fine; the version check can be a warning for an unlisted
+build:
 
 <p align="center"><img src="media/launcher.png" alt="The launcher: every check of the game folder is green" width="520"></p>
 
@@ -103,7 +104,7 @@ shortcuts follow the new folder on their own.
 and the game copy then go into a `portable-data` folder beside it.
 
 **A check is red.** Read the line under it: it says what is missing or unreadable. The most common case is a copy that is still
-encrypted; the program can only use a decrypted one.
+encrypted; the program can only use a decrypted one. A prepared folder can use `extracted/eboot_decrypted.elf` instead of `eboot.bin`.
 
 **Something looks or sounds wrong.** Please [open an issue](https://github.com/hokagocafe/open-amagami/issues) with what you did and
 what you saw (a screenshot of the program helps). Never attach files of the game.

@@ -2,7 +2,8 @@ open-amagami - play Amagami (PS Vita) on Windows from your own copy
 =====================================================================
 
 You need your own copy of Amagami ebKore+ for PS Vita (PCSG00291), as a folder
-of decrypted files (the one with AMAGAMI.IMG and SCENARIO.CPK inside).
+of decrypted files (AMAGAMI.IMG, SCENARIO.CPK, and either eboot.bin or
+extracted\eboot_decrypted.elf).
 Nothing of the game is in this download.
 
 HOW TO PLAY
@@ -11,7 +12,7 @@ HOW TO PLAY
      (If Windows says "Windows protected your PC": More info, then Run anyway.)
   2. Press "Choose game folder..." and pick the folder of your copy.
      Answer Yes to copy it into the program's own folder.
-     Every check turns green when it is fine.
+     Required checks turn green when they are fine; an unlisted version may show a warning.
   3. Press "Start game".
 
 The first time it offers an "Amagami" shortcut on the desktop and in the Start menu
