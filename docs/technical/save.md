@@ -2,6 +2,8 @@
 
 How the game saves and loads, as seen from the decompiled scripts (`scripts-out/image/`), and a proposed format for the port. The memory card side of the engine (the native code behind `MemoryCard`'s primitives, Sony's `libmc`) is a black box and was not read: everything below about the card itself is inferred from what the scripts pass and expect.
 
+**Current state of the port (2026-10-26, confirmed in the code).** The port keeps the Vita's files in the save folder: `vita_system.bin`, `vita_heads.bin` (every slot's header in one record) and `vita_slotNN.body`. The PS2 layout described below (`slotNN.head`, a 256-byte record per slot, `system.bin`) is no longer read or written (D-036); it stays here as the account of how the scripts were first understood.
+
 Confidence levels: **confirmed** (read directly from the script code), **hypothesis** (inferred, not tested), **pending**.
 
 ## Overview
@@ -170,6 +172,38 @@ Primitive mapping:
 - `writeAllData`, `writeSystemData`: write to `name.tmp`, flush, then rename over the old file (`std::filesystem::rename`, which replaces it), so a crash never leaves a half-written save. `writeAllData` writes body, then header, then system data: a header never points at a body that is not on disk. The three files are not one transaction. A header payload over 256 bytes, or any read payload larger than its buffer, fails instead of being cut.
 - `hasOldData` false and `succeedOldData` nonzero, until an import of PS2 saves exists.
 - Error codes are the port's own: -1 missing file, -2 bad header, CRC or size, -3 write failure, -4 bad argument. The scripts only test `== 0`.
+
+### The card's message box (Vita image, 2026-10-31; confirmed headless on both layers)
+
+On the console, `MemoryCard.displaySysMsg` / `waitSysMsgEnd` (Vita primitives 10 and 11) open the system's own dialog,
+which picks its text by the card's status. The port used to end both at once, so Continue with no save slid the Load
+icon in and out with no word (`LoadMenu.displayError`; the log said `memcard error`). Now primitive 10 starts a script
+thread `PortMessage.show(card, kind)` (`port/script/PortMessage.scfs`) and 11 answers true while it lives, so each
+caller's own wait loop waits as on the console; no game method is patched. `PortMessage` shows the game's
+`ConfirmDialog` (layer 15, with the OK button, mode 1) with the game's own line, waits for confirm or back
+(`ControlPad.waitOX`), plays sound 46 and closes, as the game's own "loaded" messages do. The kind is the calling class,
+read from the thread's frames: `LoadMenu` uses `printStatusForLoad`, `SaveMenu` and `SystemSave` `printStatusForSave`,
+anything else (`MemoryCardCheck` at boot) `printStatus`. When the chosen line is empty (status 2: the save exists but a
+read failed), the line is the table's own "loading failed" (15) for Load, "save failed" (11) for the saves and "system
+data loading failed" (19) at boot (`PortMessage.fallback`, native, reads `MemoryCard`'s constant table).
+
+Status 1 to 8 and the lines (index arrays of the Vita `MemoryCard`: load `[0,1,0,0,2,5,5,6,7]`, save
+`[0,1,0,4,2,4,0,6,7]`, plain `[0,1,0,0,2,3,5,6,7]`; Japanese / the owner's English patch, which translates the table):
+
+| status | what the port can produce | Continue (load) | save | at boot |
+|---|---|---|---|---|
+| 1 no card | `AMG_CARD_STATUS=1` only |There is no save data. | same | not called |
+| 2 data present, read fails | a damaged `vita_system.bin` |Loading failed. (fallback) | (fallback) | (fallback) |
+| 3 data, no room | `AMG_CARD_STATUS=3` | no call (`isExisted`) |Not enough space on memory card. | not called |
+| 5 no room | `AMG_CARD_STATUS=5` |This memory card does not contain save data. |Not enough space | not called |
+| 6 no save yet | an empty save folder |This memory card does not contain save data. | no call (`isOK`) | not called |
+| 7 broken | `AMG_CARD_STATUS=7` |This save data is corrupted. | (SaveMenu and SystemSave overwrite: no call) | same line, before the main menu |
+
+Seen: status 6 and 7 and the boot fallback (a garbage `vita_system.bin` with `amagami_vm`) on the Japanese copy, status
+6 on the English copy. With garbage in `vita_heads.bin` too, Continue opens the Load list with every slot empty (status 2,
+the headers read as empty), no message: the console would do the same as far as the scripts show. Tests:
+`tests/replays/continue_no_save.json`, `continue_broken.json`. The English table has every line, so no port text was
+needed (`ui_text.cpp` untouched).
 
 Open points (pending):
 

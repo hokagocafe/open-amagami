@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <atomic>
 #include <future>
 #include <deque>
 #include <filesystem>
@@ -22,25 +23,19 @@
 
 namespace amg {
 
-// The game's screen: the PS2's 640x448, or the PS Vita's 960x544 (its scripts lay out for its own screen).
-// Set once, before the first frame, by use_screen_of().
-inline int SCREEN_W = 640, SCREEN_H = 448;
-// The view (Vita): scripts place things in a 480x272 space and its pictures have twice that resolution, so a
-// position is drawn at VIEW_UNIT x VIEW_SCALE screen pixels per unit and a picture at VIEW_SCALE pixels per
-// texel; K2X_Script.setScrScl and setScrOrgY (primitives 6 and 7) set VIEW_SCALE and VIEW_ORG_Y. On the PS2 the
-// view is the identity.
-inline double VIEW_UNIT = 1.0, VIEW_SCALE = 1.0, VIEW_ORG_Y = 0.0;
+// The game's screen: the PS Vita's 960x544 (its scripts lay out for it).
+inline int SCREEN_W = 960, SCREEN_H = 544;
+// The view: scripts place things in a 480x272 space and the pictures have twice that resolution, so a position is
+// drawn at VIEW_UNIT x VIEW_SCALE screen pixels per unit and a picture at VIEW_SCALE pixels per texel;
+// K2X_Script.setScrScl and setScrOrgY (primitives 6 and 7) set VIEW_SCALE and VIEW_ORG_Y.
+inline double VIEW_UNIT = 2.0, VIEW_SCALE = 1.0, VIEW_ORG_Y = 0.0;
 // The size of the interface relative to the picture (1 = the game's own), a setting of the window (F5-4): the items of
 // the layers from UI_FIRST_LAYER up shrink about the nearest edge or the middle of the screen; the backgrounds, the
 // characters and anything that covers the screen stay as they are. The layer rule is a hypothesis from the event and
 // settings screens (backgrounds 0, characters 2, text window 7, settings 4 and up); AMG_UI_LAYER changes it.
 inline double UI_SCALE = 1.0;
 inline int UI_FIRST_LAYER = 4;
-inline void use_screen_of(const std::string& root) {
-    bool vita = amg::is_vita(root);
-    SCREEN_W = vita ? 960 : 640;
-    SCREEN_H = vita ? 544 : 448;
-    VIEW_UNIT = vita ? 2.0 : 1.0;
+inline void read_screen_settings() {
     // Also for the command line tool (the window reads config.txt too): AMG_UI_SCALE in percent, AMG_UI_LAYER.
     if (const char* e = std::getenv("AMG_UI_SCALE")) UI_SCALE = std::atoi(e) / 100.0;
     if (const char* e = std::getenv("AMG_UI_LAYER")) UI_FIRST_LAYER = std::atoi(e);
@@ -71,9 +66,11 @@ struct Vib {
     Tween parts[3];  // base, amplitude, frequency
     std::vector<double> phase;
     bool scale = false;
+    // A position wave: the Vita adds both waves to Y and none to X (docs/technical/fidelity.md, change 6).
+    bool position = false;
 
     Vib() = default;
-    explicit Vib(const std::vector<double>& initial, bool scale_ = false);
+    explicit Vib(const std::vector<double>& initial, bool scale_ = false, bool position_ = false);
     void step(double dt);
     std::vector<double> value() const;
     double remaining() const { return parts[0].remaining; }
@@ -92,11 +89,6 @@ struct Spin {
 
 struct Graphics;
 
-struct SnowFlake {
-    double x, y;
-    int size;
-    double speed, phase;
-};
 
 // Everything the renderer needs to draw one object, copied out of the live object. A frame is a
 // list of these, so drawing can run on another thread while the machine goes on to the next tick.
@@ -111,16 +103,56 @@ struct DrawItem {
     bool scale_on_screen = false;
     double follow = 0.0;  // the part of the screen origin (VIEW_ORG_Y) this picture follows: 1 for a background, less for a character, 0 for the interface
     bool ui = false;      // always in the interface view (scale 1), whatever setScrScl says: a Vita Sprite
-    bool snow = false;
+    bool snow = false;    // a snowflake: not an entry of a menu, not interface (see is_interface)
     bool additive = false;
     bool clipped = false;     // only pixels inside clip (screen pixels: x0, y0, x1, y1) are drawn
     double clip[4] = {0, 0, 0, 0};  // adds its light to the frame (the light balls' glow) instead of covering it
-    std::shared_ptr<const std::vector<SnowFlake>> flakes;
-    double clock = 0.0;
+    bool shrunk = false;  // set by the view transform: the interface-size shrink moved and scaled this item
+    // Its anchor (the fixed point of the shrink, from the middle of the screen; docs/technical/interface-scale.md): screen
+    // pixels after view_scene, script units in pointer_scene. The item's group shares it.
+    double ui_ax = 0.0, ui_ay = 0.0;
+    bool text = false;  // a character of text: lines of one block are grouped across their line gap
+    bool content = false;  // a background, event picture, gallery/extras picture or character: never shrunk as interface
+    int64_t uid = 0;      // the screen object it comes from (a Sprite's handle): the mouse finds a menu's entries by it
+#ifdef AMG_PERSONAL
+    int32_t char_code = -1;  // personal build only (docs/technical/personal.md): the Shift-JIS code of a text character, -1 for anything else
+#endif
 };
 
 struct Scene {
     std::vector<DrawItem> items;  // back to front
+    // Mouse mode (docs/technical/mouse-native-design.md 2.5): the screen object of the menu arrow the mouse's menu hides
+    // (its CommandMenu.cursor), 0 for none. The pointer still sees it; view_scene and render_scene leave it out.
+    int64_t hide_uid = 0;
+    // Mouse mode on a screen with an adapter: every item showing this picture (the game's menu arrow, interface picture 20)
+    // is left out too, whichever menu it belongs to (the one behind a dialog, one sliding in). Null for none.
+    ImagePtr hide_image;
+    // Set by the view transform: the interface-size factor of this frame, and the anchor of its largest interface group
+    // (only for the touch panel's inverse mapping; each item has its own, DrawItem::ui_ax/ui_ay). 1 and 0 when none.
+    double ui_u = 1.0, ui_ax = 0.0, ui_ay = 0.0;
+    // How many times Graphics::step had run when the scene was taken. The view transform's anchor state
+    // (interface-scale.md, "Stability") advances once per distinct stamp, so every pass over one frame (renderer, pointer)
+    // sees the same anchors.
+    int64_t stamp = 0;
+};
+
+// Where a point or a size of a screen's own layout (script units) is drawn: the interface shrink about the anchor of the
+// item `ref` of that screen (its group's), or unchanged when `ref` is null or not shrunk. The one mapping the pointer uses
+// for the numbers it does not read from items (docs/technical/interface-scale.md); `scene` is Graphics::pointer_scene.
+struct UiPlace {
+    double u = 1.0, ax = 0.0, ay = 0.0;
+    double X(double x) const { return ax + (x - ax) * u; }
+    double Y(double y) const { return ay + (y - ay) * u; }
+    double D(double d) const { return d * u; }
+    static UiPlace of(const Scene& scene, const DrawItem* ref) {
+        UiPlace p;
+        if (ref && ref->shrunk && scene.ui_u > 0) {
+            p.u = scene.ui_u;
+            p.ax = ref->ui_ax;
+            p.ay = ref->ui_ay;
+        }
+        return p;
+    }
 };
 
 struct ScreenObject {
@@ -128,10 +160,11 @@ struct ScreenObject {
     int64_t layer = 0;
     ImagePtr image;  // null: a plain rectangle
     double rect[4] = {0, 0, 0, 0};
-    Vib alpha{std::vector<double>{1.0}}, light{std::vector<double>{1.0, 1.0, 1.0}}, pos{std::vector<double>{0.0, 0.0}},
+    Vib alpha{std::vector<double>{1.0}}, light{std::vector<double>{1.0, 1.0, 1.0}}, pos{std::vector<double>{0.0, 0.0}, false, true},
         zoom{std::vector<double>{1.0, 1.0}, true};
     Spin spin;
     bool paused = false;
+    double sway_phase = -1.0;  // >= 0: the map icon's symbol bobs: 3 units up while the phase (frames, 0 to 60) is 30 or more
     int64_t order = 0;
     std::string name;
     bool scale_on_screen = false;
@@ -161,17 +194,8 @@ struct Graphics {
     // `centre_x` is the sprite's centre in script units: the same picture stands for Select on the left and Start on the right.
     std::function<ImagePtr(int, double)> glyph_picker;
     std::string exe;  // the executable's bytes
-    std::string clt;  // GRAPH0.CLT
-    struct Archive {
-        std::string path;
-        std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> index;
-        bool read(uint32_t hash, std::string& out) const;
-    };
-    std::vector<Archive> archives;
-    // PS Vita release (D-020): set when root/extracted/graph/GRAPH.CPK exists instead of the PS2's
-    // GRAPH0.ARC. `exe` then holds the decrypted eboot.bin instead of SLPS_259.87; `archives` stays
-    // empty. docs/technical/vita-cpk-format.md has the container and the texture-table trace.
-    bool vita = false;
+    // `exe` is the decrypted eboot.bin as an ELF; the pictures are in graph/GRAPH.CPK (docs/technical/vita-cpk-format.md
+    // has the container and the texture-table trace).
     std::string graph_cpk_path;
     CpkIndex graph_cpk;
     std::map<int64_t, std::unique_ptr<ScreenObject>> objects;
@@ -185,17 +209,10 @@ struct Graphics {
     void keep_actor(const std::string& key, ImagePtr image);
     std::map<std::string, std::vector<std::array<double, 7>>> layouts;
 
-    struct Record {
-        std::string name;
-        bool has_name = false;
-        int variant = 0;
-        double rect[4] = {0, 0, 0, 0};
-        int palette = 0;
-    };
-    Record record(int number) const;
     // Vita: the interface picture a numeric texture id and variant name, decoded out of
     // system/sysgraph.tm2 through the eboot's own tables (null if there is none).
     ImagePtr ui_image(int64_t texture, int64_t variant);
+    ImagePtr blank_stroke(int64_t texture, int64_t variant);  // variant 1000 + n: entry n's stroke without its lettering (F5-11)
     int ui_entry(int64_t texture, int64_t variant) const;  // 0: none
     const uint8_t* ui_pixels(int entry, uint32_t& w, uint32_t& h, uint32_t& pitch);
     // Texture ids the port's own code names (PS2 engine constants) -> the Vita engine's ids for the
@@ -207,8 +224,18 @@ struct Graphics {
     // Start decoding a picture on another thread so that it is ready when a script first uses it.
     // Only the machine's thread touches the caches; the tasks work on their own data.
     void preload(const std::string& name, int palette = 0);
+    // Pictures the game has to wait for (decoded on its own thread, over 2 ms): the program keeps the names and
+    // hands them to `warm` at the next start, which decodes them one after the other on a worker before they are asked for.
+    std::vector<std::string> missed;
+    std::function<void(const std::vector<std::string>&)> on_missed;  // told when a name is added to `missed`
+    void warm(const std::vector<std::string>& names);
+    ~Graphics();
     bool exists(const std::string& name) const;
     std::map<std::string, std::shared_future<ImagePtr>> pending;
+    std::atomic<bool> warm_stop{false};
+    std::future<void> warm_task;  // last member: it is waited for first, while the rest is still alive
+    std::map<std::string, std::shared_future<ImagePtr>> pending_whole;  // extra pictures already pasted into their canvas
+    static ImagePtr compose_whole(const ImagePtr& sheet);
     // What a script's `load` asks for, by the same naming the constructors use.
     bool preload_background(int64_t place, int64_t scene, int64_t mob);
     bool preload_event_picture(int64_t heroine, int64_t number, int64_t variant);
@@ -228,7 +255,7 @@ struct Graphics {
     int64_t new_background(int64_t place, int64_t scene, int64_t mob, int64_t layer);
     int64_t new_event_picture(int64_t heroine, int64_t number, int64_t variant, int64_t layer);
     int64_t new_char(int font, int64_t code, int64_t palette, int64_t layer, double x, double y, double sx, double sy);
-    int64_t new_snow(int64_t count, int64_t layer);
+    int64_t new_snow(int64_t count, int64_t layer, const int64_t dist[4], double size);
     int64_t new_actor(int64_t character, int64_t cloth, int64_t pose, int64_t layer, double ox, double oy);
     int64_t new_extra(int64_t size, int64_t picture, int64_t variant, int64_t layer);
     int64_t clone(int64_t uid);
@@ -254,12 +281,30 @@ struct Graphics {
     // Smooth drawing for the window: bilinear texture sampling and soft-edged snow. Off for the
     // pixel-exact comparison with the reference model.
     bool smooth = false;
+    // Copied into each scene as Scene::hide_uid / hide_image (set by the mouse once per frame, mouse_menus.hpp).
+    int64_t hide_uid = 0;
+    ImagePtr hide_image;
+    // The port's selection mark (mouse-native-design step A): on screens where the hidden arrow is the only mark of the
+    // selected row, a translucent bar is drawn in its place, behind the row's words. It follows the arrow's height and
+    // fade (the arrow's own item, read where it is when the scene is built), spans x0..x1 in script units and is `h`
+    // tall; in the arrow's layer, just behind it, so the interface transform treats it as the rest of the screen.
+    struct SelectionMark {
+        double x0 = 0, x1 = 0, h = 0;  // h 0: none
+        double light[3] = {1, 1, 1};
+        double alpha = 0;
+    } mark;
+    int64_t steps = 0;  // Graphics::step calls so far, copied into each scene as Scene::stamp
 
     void step(double dt);
     std::shared_ptr<const Scene> scene() const;  // snapshot of what is on screen now
     static std::vector<uint8_t> render_scene(const Scene& scene, bool smooth);
     // The scene after the view transform (script units to screen pixels): what render_scene draws, for another back end.
     static Scene view_scene(const Scene& scene);
+    // The scene as the player sees it, for the mouse (one hit-test path, docs/technical/mouse-native-design.md section 4):
+    // each item where the view transform and the interface shrink put it, its centre in script units from the middle of the
+    // picture (picture pixels / VIEW_UNIT), its scale the scene's times the shrink, and ui_ax/ui_ay in script units. A
+    // mouse at picture pixel (px, py) is at ((px - SCREEN_W / 2) / VIEW_UNIT, (py - SCREEN_H / 2) / VIEW_UNIT) in it.
+    static Scene pointer_scene(const Scene& scene);
     std::vector<uint8_t> render() const;
     void save_png(const std::string& path) const;
     // Any 24-bit RGB picture as a PNG (test aids: the GPU scene at its render scale).

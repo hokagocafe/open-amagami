@@ -216,7 +216,6 @@ std::shared_ptr<Method> decode_method(ClassObj* cls, const ClassSource::MethodSo
 std::string VM::script_dir;
 
 VM::VM(std::string root_) : root(std::move(root_)) {
-    vita_buttons = amg::is_vita(root);
     load_sources();
     install_builtins();
 }
@@ -236,8 +235,7 @@ void VM::load_sources() {
         sources[cls->name] = cls;
         image_classes.insert(cls->name);
     }
-    // A Vita root (D-020) has SCENARIO.CPK instead of SCENARIO.ARC: one .scf per entry, the same
-    // format (docs/technical/vita-cpk-format.md).
+    // SCENARIO.CPK: one .scf per entry (docs/technical/vita-cpk-format.md).
     std::string scenario_cpk = amg::data_file(root, "SCENARIO.CPK");
     if (std::filesystem::exists(scenario_cpk)) {
         // Read once, whole (8 MB): opening the file per entry costs most of a minute over a network or WSL path.
@@ -256,16 +254,6 @@ void VM::load_sources() {
             }
             sources.emplace(cls->name, cls);  // setdefault
         }
-    } else if (std::filesystem::exists(root + "/extracted/SCENARIO.ARC")) {
-        for (const std::string& blob : read_arc(read_file(root + "/extracted/SCENARIO.ARC"))) {
-            auto cls = std::make_shared<ClassSource>();
-            size_t pos = 0;
-            if (!parse_scf(blob, pos, *cls)) {
-                if (std::getenv("AMG_LOADER_DEBUG")) std::fprintf(stderr, "scenario script not parsed: %zu bytes at %zu%c", blob.size(), pos, 10);
-                continue;
-            }
-            sources.emplace(cls->name, cls);  // setdefault
-        }
     }
     // The port's own classes (PortHooks, PortSwitch, PortSettings): ours, not the game's.
     std::string own = script_dir;
@@ -275,7 +263,10 @@ void VM::load_sources() {
             if (entry.path().extension() != ".scf") continue;
             auto cls = std::make_shared<ClassSource>();
             size_t pos = 0;
-            if (parse_scf(read_file(entry.path().string()), pos, *cls)) sources[cls->name] = cls;
+            if (parse_scf(read_file(entry.path().string()), pos, *cls)) {
+                sources[cls->name] = cls;
+                image_classes.insert(cls->name);  // they run beside the image's classes: the same pad layout (ControlPad)
+            }
         }
     }
     // AMG_OVERLAY=DIR: every DIR/*.scf replaces the class of the same name (image or scenario). For probes: a
@@ -314,7 +305,13 @@ ClassObj* VM::find_class(const std::string& name) {
     if (it != classes.end()) return it->second.get();
     auto src = sources.find(name);
     if (src == sources.end()) return nullptr;
-    return define_class(src->second);
+    auto began = profile_prims ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+    ClassObj* defined = define_class(src->second);
+    if (profile_prims) {
+        double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count();
+        if (ms > 0.0) std::fprintf(stderr, "SLOWCLASS %s %.1f ms at frame %lld\n", name.c_str(), ms, (long long)tick);
+    }
+    return defined;
 }
 
 ClassObj* VM::define_class(const std::shared_ptr<ClassSource>& src) {
@@ -343,17 +340,68 @@ ClassObj* VM::define_class(const std::shared_ptr<ClassSource>& src) {
         c.method = decode_method(cls, entry);
         cls->cmethods[key(intern(entry.name), entry.args)] = c;
     }
-    if (src->name == "ConfigPage" && sources.count("PortHooks")) patch_config_page(cls);
+    if (src->name == "MainMenu" && sources.count("PortHooks")) patch_main_menu(cls);
     return cls;
 }
 
-// F5-11: the game's Settings screen builds its pages in ConfigPage#initialize(kind, items). The port's rows are added by
-// calling PortHooks.configPage(kind, items) first (docs/technical/port-settings.md). Instructions are inserted, so every
-// jump target moves; the player's own data is patched in memory and nothing of it is written.
-void VM::patch_config_page(ClassObj* cls) {
-    auto it = cls->imethods.find(key(intern("initialize"), 2));
-    if (it == cls->imethods.end() || !it->second.method) return;
+namespace {
+
+// Inserts `add` before instruction `at`. Jumps (and try targets) past `at` move with the code; a jump to `at` itself
+// lands on the inserted instructions.
+void insert_code(std::vector<Instr>& code, size_t at, const std::vector<Instr>& add) {
+    for (Instr& in : code)
+        if ((in.op == 0x40 || in.op == 0x41 || in.op == 0x44 || in.op == 0x45 || in.op == 0x69) && in.a > int(at))
+            in.a += int(add.size());
+    code.insert(code.begin() + std::ptrdiff_t(at), add.begin(), add.end());
+}
+
+}  // namespace
+
+// F5-11: the port's own options are a sixth entry of the game's main menu (docs/technical/input.md, "The port's own
+// screen"). Three calls are inserted into MainMenu, found by their shape, not by offsets:
+//   makeMenu:   before `CommandMenu.new(items, ...)`:   items = PortHooks.mainItems(self.menuCom, items)
+//               after `self.menu = ...`:                PortHooks.mainMenu(self.menu)
+//   scriptMain: after `choice = self.menuCom[self.cursor]`: PortHooks.mainSelect(choice, self.menu)
+// If any of them is not found nothing is patched, so the game's menu stays as it is. The player's data is patched in
+// memory only; nothing of it is written.
+void VM::patch_main_menu(ClassObj* cls) {
+    auto make = cls->imethods.find(key(intern("makeMenu"), 0));
+    auto main = cls->imethods.find(key(intern("scriptMain"), 0));
+    if (make == cls->imethods.end() || main == cls->imethods.end() || !make->second.method || !main->second.method) return;
     auto& consts = cls->src->constants;
+    int menu_com = -1;
+    for (const auto& [slot, name] : cls->src->instance_vars)
+        if (name == "menuCom") menu_com = slot;
+    if (menu_com < 0) return;
+    auto is_const = [&](const Instr& in, uint8_t tag, const char* text) {
+        return (in.op == 0x50 || in.op == 0x51) && in.a >= 0 && size_t(in.a) < consts.size() && consts[size_t(in.a)].tag == tag &&
+               consts[size_t(in.a)].s == text;
+    };
+    // makeMenu: push_const CommandMenu, push_local ITEMS, ..., send new, pop_ivar MENU
+    auto& mk = make->second.method->code;
+    size_t at_new = 0, at_menu = 0;
+    int items = -1, menu = -1;
+    for (size_t i = 0; i + 1 < mk.size(); ++i)
+        if (is_const(mk[i], 6, "CommandMenu") && mk[i + 1].op == 0x22) {
+            at_new = i;
+            items = mk[i + 1].a;
+            for (size_t j = i + 2; j < mk.size(); ++j)
+                if (mk[j].op == 0x21) {
+                    at_menu = j;
+                    menu = mk[j].a;
+                    break;
+                }
+            break;
+        }
+    // scriptMain: push_ivar menuCom, push_ivar CURSOR, index_get, pop_local CHOICE
+    auto& sm = main->second.method->code;
+    size_t at_choice = 0;
+    for (size_t i = 0; i + 3 < sm.size(); ++i)
+        if (sm[i].op == 0x20 && sm[i].a == menu_com && sm[i + 1].op == 0x20 && sm[i + 2].op == 0x64 && sm[i + 3].op == 0x23) {
+            at_choice = i + 3;
+            break;
+        }
+    if (items < 0 || menu < 0 || at_choice == 0) return;
     auto add = [&](uint8_t tag, const char* text) {
         ClassSource::Constant c;
         c.tag = tag;
@@ -361,12 +409,12 @@ void VM::patch_config_page(ClassObj* cls) {
         consts.push_back(c);
         return int(consts.size()) - 1;
     };
-    const int hooks = add(6, "PortHooks"), hook = add(7, "configPage");
-    const std::vector<Instr> head = {{0x51, hooks, 0}, {0x22, 0, 0}, {0x22, 1, 0}, {0x32, 2, hook}, {0x05, 0, 0}};
-    auto& code = it->second.method->code;
-    for (Instr& in : code)
-        if (in.op == 0x40 || in.op == 0x41 || in.op == 0x44 || in.op == 0x45 || in.op == 0x69) in.a += int(head.size());
-    code.insert(code.begin(), head.begin(), head.end());
+    const int hooks = add(6, "PortHooks");
+    const int main_items = add(7, "mainItems"), main_menu = add(7, "mainMenu"), main_select = add(7, "mainSelect");
+    const int choice = sm[at_choice].a;
+    insert_code(sm, at_choice + 1, {{0x51, hooks, 0}, {0x22, choice, 0}, {0x20, menu, 0}, {0x32, 2, main_select}, {0x05, 0, 0}});
+    insert_code(mk, at_menu + 1, {{0x51, hooks, 0}, {0x20, menu, 0}, {0x32, 1, main_menu}, {0x05, 0, 0}});
+    insert_code(mk, at_new, {{0x51, hooks, 0}, {0x20, menu_com, 0}, {0x22, items, 0}, {0x32, 2, main_items}, {0x23, items, 0}});
 }
 
 Value VM::make_str(std::string s) {
@@ -449,28 +497,39 @@ const std::vector<Value>& VM::constants(ClassObj* cls) {
 }
 
 ClassObj* VM::class_of(const Value& v) {
+    static const char* const names[] = {"Nil", "True", "False", "Integer", "Float", "String", "Symbol", nullptr, nullptr, "Class"};
     switch (v.tag) {
-        case Tag::Nil: return find_class("Nil");
-        case Tag::True: return find_class("True");
-        case Tag::False: return find_class("False");
-        case Tag::Int: return find_class("Integer");
-        case Tag::Float: return find_class("Float");
-        case Tag::Str: return find_class("String");
-        case Tag::Sym: return find_class("Symbol");
         case Tag::Arr: return static_cast<ArrObj*>(v.p.get())->cls;
-        case Tag::Class: return find_class("Class");
         case Tag::Obj: return static_cast<ObjObj*>(v.p.get())->cls;
+        default: {
+            ClassObj*& slot = builtin_cls_[size_t(v.tag)];
+            if (!slot) slot = find_class(names[size_t(v.tag)]);
+            return slot;
+        }
     }
-    return nullptr;
+}
+
+bool VM::is_plain_array(const ArrObj* a) {
+    if (!plain_array_cls_[0]) {
+        plain_array_cls_[0] = find_class("Array");
+        plain_array_cls_[1] = find_class("ByteArray");
+        plain_array_cls_[2] = find_class("UShortArray");
+    }
+    return a->cls == plain_array_cls_[0] || a->cls == plain_array_cls_[1] || a->cls == plain_array_cls_[2];
 }
 
 Callable VM::lookup(const Value& recv, int name_id, int argc) {
+    const Callable* c = lookup_ptr(recv, name_id, argc);
+    return c ? *c : Callable{};
+}
+
+const Callable* VM::lookup_ptr(const Value& recv, int name_id, int argc) {
     uint64_t k = key(name_id, argc);
     ClassObj* cls;
     if (recv.tag == Tag::Class) {
         for (ClassObj* c = static_cast<ClassObj*>(recv.p.get()); c; c = c->parent) {
             auto it = c->cmethods.find(k);
-            if (it != c->cmethods.end()) return it->second;
+            if (it != c->cmethods.end()) return &it->second;
         }
         cls = find_class("Class");
     } else {
@@ -478,9 +537,9 @@ Callable VM::lookup(const Value& recv, int name_id, int argc) {
     }
     for (ClassObj* c = cls; c; c = c->parent) {
         auto it = c->imethods.find(k);
-        if (it != c->imethods.end()) return it->second;
+        if (it != c->imethods.end()) return &it->second;
     }
-    return Callable{};
+    return nullptr;
 }
 
 Value VM::call(Value recv, const Callable& c, std::vector<Value> args, Thread* th) {
@@ -510,7 +569,6 @@ Value VM::instantiate(ClassObj* cls, std::vector<Value> args, Thread* th) {
 // high one) to SceCtrl's (the same two bytes the other way round). The Vita's shoulder buttons are SceCtrl's
 // L/R triggers (0x100, 0x200): the PS2's L1/R1 go there too.
 int VM::to_script_buttons(int m) const {
-    if (!vita_buttons) return m;
     int v = ((m & 0xFF) << 8) | ((m >> 8) & 0xFF);
     if (m & 0x4) v |= 0x100;
     if (m & 0x8) v |= 0x200;
@@ -523,7 +581,7 @@ int VM::buttons_held(bool ps2_layout) const {
     int mask = 0;
     for (auto& p : presses)
         if (std::get<0>(p) <= tick && tick <= std::get<1>(p)) mask |= std::get<2>(p);
-    return layout(mask | auto_press.mask_at(tick) | monkey.mask_at(tick));
+    return layout(mask | pointer_mask | auto_press.mask_at(tick) | monkey.mask_at(tick));
 }
 
 int VM::buttons_pressed(bool ps2_layout) const {
@@ -532,13 +590,12 @@ int VM::buttons_pressed(bool ps2_layout) const {
     int mask = 0;
     for (auto& p : presses)
         if (std::get<0>(p) == tick) mask |= std::get<2>(p);
-    return layout(mask | (auto_press.mask_at(tick) & ~auto_press.mask_at(tick - 1)) |
+    return layout(mask | (pointer_mask & ~pointer_prev) | (auto_press.mask_at(tick) & ~auto_press.mask_at(tick - 1)) |
                   (monkey.mask_at(tick) & ~monkey.mask_at(tick - 1)));
 }
 
 int VM::buttons_rapid(bool ps2_layout) const {
     int held = buttons_held(ps2_layout);
-    if (!vita_buttons) return rapid_fire_ps2 ? held : buttons_pressed(ps2_layout);
     return buttons_pressed(ps2_layout) | (rapid_count == 20 ? held : 0);
 }
 
@@ -551,12 +608,6 @@ void VM::advance(int64_t to) {
             live_held = held;
         }
         int held = buttons_held(true);
-        rapid_fire_ps2 = false;
-        if (held != rapid_last) rapid_count_ps2 = 0;
-        else if (++rapid_count_ps2 >= 21) {
-            rapid_fire_ps2 = true;
-            rapid_count_ps2 -= 4;
-        }
         if (held != rapid_last || !held) rapid_count = 0;
         else rapid_count = rapid_count < 20 ? rapid_count + 1 : (rapid_count + 1 >= 25 ? 20 : rapid_count + 1);
         rapid_last = held;
@@ -834,6 +885,7 @@ Value Thread::loop(size_t stop_depth) {
             const Instr in = code[size_t(pc)];
             ++pc;
             if (++v.steps > v.max_steps) throw VMExit{};
+            if (v.on_busy && (v.steps & 0xFFFF) == 0) v.on_busy(v);
             ++method->executed;
             switch (in.op) {
                 case 0x22: stack.push_back(stack[base + 1 + size_t(in.a)]); break;
@@ -858,16 +910,16 @@ Value Thread::loop(size_t stop_depth) {
                     int name_id = static_cast<SymObj*>(sym.p.get())->id;
                     int argc = in.a;
                     Value recv = argc ? stack[stack.size() - size_t(argc) - 1] : stack.back();
-                    Callable hit;
+                    const Callable* hit = nullptr;  // the tables are filled when a class is defined and never change after: no copy
                     if (in.op & 1) {  // send_super: start in the parent of the class defining this method
                         uint64_t k = VM::key(name_id, argc);
                         for (ClassObj* c = cls->parent; c && !hit; c = c->parent) {
                             auto& table = recv.tag == Tag::Class ? c->cmethods : c->imethods;
                             auto it = table.find(k);
-                            if (it != table.end()) hit = it->second;
+                            if (it != table.end()) hit = &it->second;
                         }
                     } else {
-                        hit = v.lookup(recv, name_id, argc);
+                        hit = v.lookup_ptr(recv, name_id, argc);
                     }
                     if (!hit) {
                         frames.back().pc = pc;
@@ -875,7 +927,7 @@ Value Thread::loop(size_t stop_depth) {
                         v.raise("no method " + static_cast<SymObj*>(sym.p.get())->name + "/" + std::to_string(argc) +
                                 " for <class " + (k ? k->name : "?") + ">");
                     }
-                    if (hit.native) {
+                    if (hit->native) {
                         if (v.coverage) v.natives_used.insert(VM::key(name_id, argc));
                         if (v.coverage) {
                             uint64_t k = VM::key(name_id, argc);
@@ -899,13 +951,19 @@ Value Thread::loop(size_t stop_depth) {
                         }
                         std::vector<Value> args(stack.end() - argc, stack.end());
                         frames.back().pc = pc;
-                        Value result = hit.native(v, *this, recv, args);
+                        auto began = v.profile_prims ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+                        Value result = hit->native(v, *this, recv, args);
+                        if (v.profile_prims) {
+                            double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count();
+                            if (ms > 3.0 && v.names[name_id] != "sleep")
+                                std::fprintf(stderr, "SLOWNATIVE %s %.1f ms at frame %lld\n", v.names[name_id].c_str(), ms, (long long)v.tick);
+                        }
                         stack.resize(stack.size() - size_t(argc) - 1);
                         stack.push_back(std::move(result));
                     } else {
                         frames.back().pc = pc;
-                        hit.method->ran = true;
-                        frames.push_back({hit.method.get(), 0, stack.size() - size_t(argc) - 1});
+                        hit->method->ran = true;
+                        frames.push_back({hit->method.get(), 0, stack.size() - size_t(argc) - 1});
                         goto next_frame;
                     }
                     break;
@@ -972,6 +1030,13 @@ Value Thread::loop(size_t stop_depth) {
                     stack.pop_back();
                     Value o = std::move(stack.back());
                     stack.pop_back();
+                    if (o.tag == Tag::Arr && i.tag == Tag::Int) {  // the common case without a send: a built-in array, in range
+                        const auto* arr = static_cast<ArrObj*>(o.p.get());
+                        if (i.i >= 0 && i.i < int64_t(arr->items.size()) && v.is_plain_array(arr)) {
+                            stack.push_back(arr->items[size_t(i.i)]);
+                            break;
+                        }
+                    }
                     stack.push_back(v.send(*this, o, "[]", {i}));
                     break;
                 }
@@ -983,6 +1048,14 @@ Value Thread::loop(size_t stop_depth) {
                     stack.pop_back();
                     Value o = std::move(stack.back());
                     stack.pop_back();
+                    if (o.tag == Tag::Arr && i.tag == Tag::Int) {
+                        auto* arr = static_cast<ArrObj*>(o.p.get());
+                        if (i.i >= 0 && i.i < int64_t(arr->items.size()) && v.is_plain_array(arr)) {
+                            arr->items[size_t(i.i)] = val;
+                            stack.push_back(std::move(val));
+                            break;
+                        }
+                    }
                     stack.push_back(v.send(*this, o, "atPut", {i, val}));
                     break;
                 }

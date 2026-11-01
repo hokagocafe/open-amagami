@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/hokagocafe/open-amagami/releases/latest/download/open-amagami-windows-x86.zip"><b>⬇ Download for Windows</b></a>
+  <a href="https://github.com/hokagocafe/open-amagami/releases/latest/download/open-amagami-windows-x64.zip"><b>⬇ Download for Windows</b></a>
   &nbsp;·&nbsp;
   <a href="https://github.com/hokagocafe/open-amagami/releases">All versions</a>
   &nbsp;·&nbsp;
@@ -38,28 +38,28 @@ gamepad, the keyboard or the mouse. It is a new program that reads the game's ow
 ## What you need
 
 - A PC with **Windows 10 or 11**.
-- **Your own copy of *Amagami ebKore+* for PS Vita** (`PCSG00291`) as a decrypted folder, or a Vita3K export with `app/PCSG00291`.
-  It has to be readable; the program checks it and tells you. It cannot make or fix one for you.
+- **Your own copy of *Amagami ebKore+* for PS Vita** (`PCSG00291`), decrypted: the game's folder as a decrypted dump has it
+  (`AMAGAMI.IMG`, `SCENARIO.CPK`, `graph`, `sound` and the executable), or a Vita3K install. The Japanese original and the English
+  fan translation both work. The program checks the copy and tells you what is wrong; it cannot decrypt one for you.
 
 Nothing has to be installed: no runtimes, no emulator.
 
 ## How to play
 
-**1. Download and unpack.** Get the zip with the [download link](https://github.com/hokagocafe/open-amagami/releases/latest/download/open-amagami-windows-x86.zip)
+**1. Download and unpack.** Get the zip with the [download link](https://github.com/hokagocafe/open-amagami/releases/latest/download/open-amagami-windows-x64.zip)
 above, then right-click it, choose *Extract All...* and pick any folder (your Desktop is fine).
 
-**2. Start `amagami.exe` and choose your game.** The launcher opens. Press **Choose game folder...**, pick the folder of your copy (the
-one with `AMAGAMI.IMG` and `SCENARIO.CPK` inside, plus `eboot.bin` or `extracted/eboot_decrypted.elf`), or a Vita3K export folder
-containing `app/PCSG00291` and optionally `patch/PCSG00291`. Answer **Yes** to copy it into the program's own folder. Each required
-check turns green when it is fine; the version check can be a warning for an unlisted build:
+**2. Start `amagami.exe` and choose your game.** The launcher opens and looks for your copy by itself (a Vita3K install, your Desktop,
+your Downloads and the folders of the last run). If it finds one, press the big button to use it. Otherwise press **Choose game
+folder...** and pick your copy's folder (or the folder above it: the program looks a few levels down), or simply drop the folder on
+the launcher. Answer **Yes** to copy it into the program's own folder. Each check turns green when it is fine; the version check may
+only warn about a build it does not know. When something is missing, the launcher says in plain words what and what to do (in
+English, Spanish or Japanese, following Windows):
 
 <p align="center"><img src="media/launcher.png" alt="The launcher: every check of the game folder is green" width="520"></p>
 
-The sound check accepts packed archives or extracted voices and prepared audio. If music, ambience or sound effects are absent, it
-names the missing categories; some decrypted folders contain only part of the game's sound data.
-
 **3. Press Start game.** That is all. The first time, the program also offers a shortcut on the desktop and in the Start menu;
-next time, open it from there (or run `amagami.exe`) and press Start game. **Settings → Desktop shortcut** makes them again.
+next time, open it from there (or run `amagami.exe`) and press Start game. **General → Desktop shortcut** makes them again.
 
 > Windows may say *"Windows protected your PC"* the first time, because the program is new and not signed. Press **More info**, then
 > **Run anyway**.
@@ -67,14 +67,16 @@ next time, open it from there (or run `amagami.exe`) and press Start game. **Set
 ## Playing in English
 
 If your copy already has the English fan translation (*Amagami EbKore+ English v1.1*), the launcher says so and the game is in
-English. If your copy is the original Japanese one and you have the translation's files, open **Settings**, press
+English. If your copy is the original Japanese one and you have the translation's files, open the **Game files** tab, press
 **Add English patch...** and pick the translation's folder; the program copies what it needs and switches to English. You can switch
-back in **Settings → Language** at any time.
+back in **Game files → Language** at any time.
 
 ## Controls
 
 A gamepad (PlayStation, Xbox and most others) works as soon as it is plugged in, and the button pictures in the game follow the pad
-you use. The mouse works in the menus. On the keyboard:
+you use. The mouse works like the game's own cursor: hover an entry and it lights at once, click chooses, right click goes back, the wheel moves
+entry by entry. It works on the title, in every menu, in the Settings screen (rows, sliders, tabs), in the name entry, on the day map
+and in the gallery, and the game's own arrow is the pointer. On the keyboard:
 
 | Game button | Key | | Game button | Key |
 |---|---|---|---|---|
@@ -83,7 +85,15 @@ you use. The mouse works in the menus. On the keyboard:
 | Square / Triangle | A / S | | Select | Backspace |
 | L / R | Q / W | | L2 / R2 | E / R |
 
-Every key can be changed in **Settings → Controls...**. **F11** (or Alt+Enter) switches full screen, **Esc** quits.
+Every key, and every pad button, can be changed in the launcher's **Controls** tab (**Controls...**). A pad the program does not recognise can be added with a
+`gamecontrollerdb.txt` (SDL's mapping format, one line per pad) placed next to `amagami.exe`. **F8** opens the settings (picture options, keyboard and pad buttons, pad mapping) over the game, which waits. **F11** (or Alt+Enter) switches full screen, **Esc** quits.
+
+## The program's options
+
+The picture options are in the game's own menu too: the last entry of the main menu, **Port options**, opens them as pages
+(left and right turn the pages; they are also in the **Misc** tab of Settings as **Port options 1 / 5**). There are fifteen options in all, among them window mode, the screen filter
+(smooth, sharp, pixels, bicubic, Lanczos, sharpen), brightness, gamma, vertical sync and a frame counter. Each change applies at once
+and is remembered.
 
 <p align="center">
   <img src="media/settings.png" alt="The Settings window" width="45%">
@@ -92,39 +102,50 @@ Every key can be changed in **Settings → Controls...**. **F11** (or Alt+Enter)
 
 ## Questions
 
-**Where are my saves?** In `%APPDATA%\open-amagami` (paste that into the address bar of a folder window, or use **Settings → Open
+**Where are my saves?** In `%APPDATA%\open-amagami` (paste that into the address bar of a folder window, or use **Game files → Open
 saves folder**). Updating the program keeps them.
 
-**How do I update?** When a new version is out, the launcher shows a **Get the new version** button that opens the download page
-(the version you have is written beside the title; **Settings → Check for updates** turns the check off). Unpack the new zip over
-the old folder, or into a new one: your saves, settings and copied game stay where they are, and the desktop and Start menu
-shortcuts follow the new folder on their own.
+**How do I update?** When a new version is out, the launcher shows a **Get the new version** button (the version you have is written
+beside the title; **General → Check for updates** turns the check off). Press it and answer Yes: the program downloads the new
+version, checks it against its published SHA-256, replaces itself and restarts, or, if anything goes wrong, leaves everything as it
+was and opens the download page. You can also unpack the new zip over the old folder, or into a new one. Either way your saves,
+settings and copied game stay where they are, and the desktop and Start menu shortcuts follow the new folder on their own.
+
+**The game says a save is unreadable.** If a save file is damaged, or comes from another version of the program, it is moved
+aside into a folder called `unreadable-...` inside the saves folder (nothing is deleted) and the next start is clean.
+
+**The program stopped or would not start.** A window says what happened and where the report (`crash.txt`) is saved. After a
+failure at start-up, the launcher opens the next time so you can check the game folder. Send the report with what you were doing.
+Folders with accents or Japanese letters in their names work.
 
 **Can I delete my original copy after it is copied?** Yes. The program keeps its own copy in `%LOCALAPPDATA%\open-amagami`;
-**Settings → Delete copy of the game...** removes it again.
+**Game files → Delete copy of the game...** removes it again.
 
 **Can I keep everything in one folder (a USB stick)?** Put an empty file called `portable.txt` next to `amagami.exe`; saves, settings
 and the game copy then go into a `portable-data` folder beside it.
 
 **A check is red.** Read the line under it: it says what is missing or unreadable. The most common case is a copy that is still
-encrypted; the program can only use a decrypted one. A prepared folder can use `extracted/eboot_decrypted.elf` instead of `eboot.bin`.
+encrypted; the program can only use a decrypted one. If the sound line warns, part of the copy's sound files are missing and the
+game will play with that part silent. If it says the executable is the English patch's, put the original game's `eboot.bin` in its
+place (the translated data files can stay): the patch's own executable has its tables moved and the program cannot use it.
 
 **Something looks or sounds wrong.** Please [open an issue](https://github.com/hokagocafe/open-amagami/issues) with what you did and
 what you saw (a screenshot of the program helps). Never attach files of the game.
 
 ## Status
 
-Early: these are the **v0.1** releases. The game's own scripts run unchanged, every scene of the story is run by automatic tests, the
-drawing is compared with the console version scene by scene, and sound, saves, gamepads and the English translation work. Expect
+Early: these are the **v0.x** releases. The game's own scripts run unchanged, every scene of the story is run by automatic tests, the
+drawing is compared with the console version scene by scene (and corrected where reading the console's code showed a difference), and
+sound, saves, gamepads, the mouse and the English translation work. The program is 64-bit and has a portable mode (see above). Expect
 rough edges, and tell us about them.
 
 ## For developers
 
-The engine is C++ (32-bit, Windows), with SDL3 for gamepads and Direct3D 11 for drawing. You need Visual Studio's C++ tools (the
-32-bit toolchain), CMake and Ninja:
+The engine is C++ (64-bit, Windows), with SDL3 for gamepads and Direct3D 11 for drawing. You need Visual Studio's C++ tools (the
+64-bit toolchain), CMake and Ninja:
 
 ```bat
-call "...\VC\Auxiliary\Build\vcvarsall.bat" x86
+call "...\VC\Auxiliary\Build\vcvarsall.bat" x64
 cmake -S port -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ```

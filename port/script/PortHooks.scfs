@@ -1,21 +1,47 @@
 class "PortHooks" : "Object" flags=0
-const class "PortSwitch"
+const class "Array"
 const class "PortSettings"
-const float 0x41900000 ; 18.0
-const float 0x00000000 ; 0.0
+const class "PortMenuEntry"
+const class "PortMain"
 const symbol "new"
 const symbol "length"
 const symbol "put"
-const symbol "getPosY"
-const symbol "count"
-classmethod "configPage" args=2 locals=2 {
-    if (arg0 == 3) {
-        loc0 = arg1[arg1.length() - 1].getPosY() + 18.0f;
-        loc1 = 0;
-        while (loc1 < PortSettings.count()) {
-            arg1.put(PortSwitch.new(loc1, loc0));
-            loc0 = loc0 + 18.0f;
-            loc1 = loc1 + 1;
-        }
+const symbol "field"
+const symbol "setField"
+const symbol "destruct"
+const symbol "scriptMain"
+const float 0x41b00000 ; 22.0
+; Called by the game's MainMenu, patched in memory by the VM (VM::patch_main_menu, docs/technical/input.md).
+; makeMenu, before the menu is made: one more entry, command 8, after the game's own. Its picture is a placeholder
+; (the "Settings" stroke) until mainMenu puts the port's entry in its place.
+classmethod "mainItems" args=2 locals=4 {
+    loc0 = Array.new(arg1.length() + 1);
+    loc1 = 0;
+    while (loc1 < arg1.length()) {
+        loc0[loc1] = arg1[loc1];
+        loc1 = loc1 + 1;
+    }
+    loc0[loc1] = [42, 3];
+    arg0.put(8);
+    return loc0;
+}
+; makeMenu, after: the last entry becomes the port's (a stroke and a label in the layer's language). Past eight entries
+; (every extra unlocked) the pitch shrinks so that the last one stays on the screen.
+classmethod "mainMenu" args=1 locals=3 {
+    loc0 = PortSettings.field(arg0, "icon");
+    if (loc0 == nil) {
+        return;
+    }
+    loc1 = loc0.length() - 1;
+    loc0[loc1].destruct();
+    loc0[loc1] = PortMenuEntry.new();
+    if (loc0.length() > 8) {
+        PortSettings.setField(arg0, "pitchY", 22.0f);
+    }
+}
+; scriptMain, when an entry is confirmed: the port's screen for command 8; the game's own commands go on as before.
+classmethod "mainSelect" args=2 locals=0 {
+    if (arg0 == 8) {
+        PortMain.new().scriptMain(arg1);
     }
 }

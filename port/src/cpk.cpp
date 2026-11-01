@@ -249,26 +249,21 @@ std::string cpk_decompress_crilayla(const std::string& data) {
     const uint8_t* compressed = reinterpret_cast<const uint8_t*>(data.data()) + 16;
 
     int64_t input_offset = int64_t(header_offset) - 1;
-    uint32_t bit_pool = 0;
+    // The bits come from the end of the input backwards, each byte most significant bit first: an accumulator that takes
+    // a byte at a time and hands out the top `n` of the bits it holds.
+    uint64_t pool = 0;
     int bits_left = 0;
     uint32_t output_end = 0x100 + uncompressed_size - 1;
     uint32_t bytes_output = 0;
 
     auto get_bits = [&](int n) -> uint32_t {
-        uint32_t value = 0;
-        int produced = 0;
-        while (produced < n) {
-            if (bits_left == 0) {
-                bit_pool = compressed[input_offset];
-                input_offset -= 1;
-                bits_left = 8;
-            }
-            int take = std::min(bits_left, n - produced);
-            value = (value << take) | ((bit_pool >> (bits_left - take)) & ((1u << take) - 1));
-            bits_left -= take;
-            produced += take;
+        while (bits_left < n) {
+            pool = (pool << 8) | compressed[input_offset];
+            input_offset -= 1;
+            bits_left += 8;
         }
-        return value;
+        bits_left -= n;
+        return uint32_t((pool >> bits_left) & ((uint64_t(1) << n) - 1));
     };
 
     while (bytes_output < uncompressed_size) {

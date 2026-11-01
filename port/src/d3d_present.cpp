@@ -40,7 +40,10 @@ VOut vs(uint id : SV_VertexID) {
 // Presenting a finished frame: the window's letterbox.
 Texture2D tex : register(t0);
 SamplerState smp : register(s0);
-float4 ps(VOut i) : SV_Target { return float4(tex.Sample(smp, i.uv).rgb, 1); }
+// The player's brightness (a factor) and gamma (the exponent is 1 / gamma), applied last by every presenting shader.
+cbuffer Tone : register(b1) { float4 tone; };
+float3 finish(float3 c) { return pow(saturate(c * tone.x), tone.y); }
+float4 ps(VOut i) : SV_Target { return float4(finish(tex.Sample(smp, i.uv).rgb), 1); }
 
 // The same with "sharp bilinear": a texel keeps its own colour except along its edges, where the linear sampler blends it
 // into the next one over about one screen pixel, so a scaled picture is neither blurry nor blocky. The scale (screen pixels
@@ -54,7 +57,82 @@ float4 ps_sharp(VOut i) : SV_Target {
     float2 off = at - base - 0.5;
     float2 range = 0.5 - 0.5 / max(scale, 1.0);
     float2 f = (off - clamp(off, -range, range)) * max(scale, 1.0) + 0.5;
-    return float4(tex.Sample(smp, (base + f) / size).rgb, 1);
+    return float4(finish(tex.Sample(smp, (base + f) / size).rgb), 1);
+}
+
+// Bicubic (Catmull-Rom): sixteen texels around the point, weighted by a cubic that goes through the texels, so the edges
+// stay crisper than with the linear sampler without the blocks of the nearest one.
+float4 catmull(float t) {
+    float t2 = t * t, t3 = t2 * t;
+    return float4(-0.5 * t3 + t2 - 0.5 * t, 1.5 * t3 - 2.5 * t2 + 1.0, -1.5 * t3 + 2.0 * t2 + 0.5 * t, 0.5 * t3 - 0.5 * t2);
+}
+float4 ps_bicubic(VOut i) : SV_Target {
+    float2 size;
+    tex.GetDimensions(size.x, size.y);
+    float2 at = i.uv * size - 0.5;
+    float2 base = floor(at);
+    float2 f = at - base;
+    float4 wx = catmull(f.x), wy = catmull(f.y);
+    float3 sum = 0;
+    [unroll] for (int j = 0; j < 4; ++j)
+        [unroll] for (int k = 0; k < 4; ++k) {
+            int2 p = clamp(int2(base) + int2(k - 1, j - 1), int2(0, 0), int2(size) - 1);
+            sum += tex.Load(int3(p, 0)).rgb * (wx[k] * wy[j]);
+        }
+    return float4(finish(sum), 1);
+}
+
+// Lanczos with two lobes: the same sixteen texels, the weights of sinc(x) * sinc(x / 2), normalised.
+float lanczos2(float d) {
+    d = abs(d);
+    if (d < 0.0001) return 1.0;
+    if (d >= 2.0) return 0.0;
+    float a = 3.14159265 * d;
+    return 2.0 * sin(a) * sin(a * 0.5) / (a * a);
+}
+float4 ps_lanczos(VOut i) : SV_Target {
+    float2 size;
+    tex.GetDimensions(size.x, size.y);
+    float2 at = i.uv * size - 0.5;
+    float2 base = floor(at);
+    float2 f = at - base;
+    float3 sum = 0;
+    float total = 0;
+    [unroll] for (int j = 0; j < 4; ++j)
+        [unroll] for (int k = 0; k < 4; ++k) {
+            float w = lanczos2(float(k - 1) - f.x) * lanczos2(float(j - 1) - f.y);
+            int2 p = clamp(int2(base) + int2(k - 1, j - 1), int2(0, 0), int2(size) - 1);
+            sum += tex.Load(int3(p, 0)).rgb * w;
+            total += w;
+        }
+    return float4(finish(sum / total), 1);
+}
+
+// Sharpen: the linear sampler plus a contrast-adaptive sharpening pass (the idea of AMD's CAS): the four neighbours one
+// screen pixel away, a weight that is smaller where the local contrast is already high, so edges gain bite without halos.
+float4 ps_cas(VOut i) : SV_Target {
+    float2 d = fwidth(i.uv);
+    float3 c = tex.Sample(smp, i.uv).rgb;
+    float3 n = tex.Sample(smp, i.uv + float2(0, -d.y)).rgb, s = tex.Sample(smp, i.uv + float2(0, d.y)).rgb;
+    float3 e = tex.Sample(smp, i.uv + float2(d.x, 0)).rgb, w = tex.Sample(smp, i.uv + float2(-d.x, 0)).rgb;
+    float3 mn = min(c, min(min(n, s), min(e, w))), mx = max(c, max(max(n, s), max(e, w)));
+    float3 amp = sqrt(saturate(min(mn, 1.0 - mx) / max(mx, 0.0001)));
+    float3 k = amp * -0.125;
+    return float4(finish((k * (n + s + e + w) + c) / (1.0 + 4.0 * k)), 1);
+}
+
+// "Fit, blurred edges": under the picture, the same frame enlarged to cover the whole window and blurred, darkened. `tone.zw` is
+// the part of the frame the window shows when it covers the window (the other two numbers of the constant buffer are the
+// brightness and gamma).
+float4 ps_blur(VOut i) : SV_Target {
+    float2 uv = (i.uv - 0.5) * tone.zw + 0.5;
+    float3 sum = 0;
+    [unroll] for (int k = 0; k < 40; ++k) {
+        float a = float(k) * 2.39996323;                       // the golden angle: an even spread of taps over a disc
+        float r = 0.07 * sqrt((float(k) + 0.5) / 40.0);
+        sum += tex.Sample(smp, uv + float2(cos(a), sin(a)) * r).rgb;
+    }
+    return float4(finish(sum / 40.0 * 0.55), 1);
 }
 
 // Drawing a DrawItem (the arithmetic of `draw()` in gfx.cpp, smooth path): the pixel's position is mapped back into
@@ -88,19 +166,12 @@ float4 ps_item(VOut i) : SV_Target {
     return float4(saturate(t.rgb * light.rgb), a);
 }
 
-// A snowflake: the coverage of each pixel by the flake's square, blended toward white.
-float4 ps_flake(VOut i) : SV_Target {
-    float2 p = floor(i.pos.xy);
-    float cx = max(0.0, min(p.x + 1.0, flake.x + flake.z) - max(p.x, flake.x));
-    float cy = max(0.0, min(p.y + 1.0, flake.y + flake.z) - max(p.y, flake.y));
-    return float4(1, 1, 1, flake.w * cx * cy);
-}
 )";
 
 struct ItemConstants {
     float geo[4], axes[4], origin[4];
     int lim[4];
-    float light[4], flake[4];
+    float light[4];
 };
 
 }  // namespace
@@ -119,11 +190,14 @@ struct D3DPresenter::Impl {
     ComPtr<ID3D11ShaderResourceView> scene_view;
     ComPtr<ID3D11RenderTargetView> scene_target;
     ComPtr<ID3D11VertexShader> vs;
-    ComPtr<ID3D11PixelShader> ps, ps_sharp, ps_item, ps_flake;
-    std::atomic<int> aspect{0};        // 0 fit, 1 fill (crops), 2 stretch, 3 whole multiples of the frame
+    ComPtr<ID3D11PixelShader> ps, ps_sharp, ps_item, ps_bicubic, ps_lanczos, ps_cas, ps_blur;
+    std::atomic<int> aspect{0};        // 0 fit, 1 fill (crops), 2 stretch, 3 whole multiples of the frame, 4 fit over a blurred copy
     std::atomic<int> render_scale{0};  // the scene texture is this many times the frame (1..4); 0 follows the window
     int scale = 1;                      // the one the scene texture has now
-    std::atomic<int> filter{0};  // how the frame is scaled to the window: 0 smooth, 1 sharp bilinear, 2 pixels
+    std::atomic<bool> vsync{true};
+    std::atomic<float> brightness{1.0f}, gamma{1.0f};  // the player's picture settings (tone_cb)
+    ComPtr<ID3D11Buffer> tone_cb;
+    std::atomic<int> filter{0};  // how the frame is scaled to the window: 0 smooth, 1 sharp bilinear, 2 pixels, 3 bicubic, 4 Lanczos, 5 sharpen
     ComPtr<ID3D11SamplerState> point, linear;
     ComPtr<ID3D11Buffer> item_cb;
     ComPtr<ID3D11RasterizerState> raster;
@@ -200,6 +274,7 @@ struct D3DPresenter::Impl {
             }
         }
         D3D11_VIEWPORT vp = {float((back_w - w) / 2), float((back_h - h) / 2), float(w), float(h), 0.0f, 1.0f};
+        const bool bars = fit == 4 && (w < back_w || h < back_h);
         const float black[4] = {0, 0, 0, 1};
         context->OMSetRenderTargets(1, target.GetAddressOf(), nullptr);
         context->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
@@ -209,15 +284,36 @@ struct D3DPresenter::Impl {
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         context->VSSetShader(vs.Get(), nullptr, 0);
         const int mode = filter.load();
-        context->PSSetShader((mode == 1 ? ps_sharp : ps).Get(), nullptr, 0);
+        ID3D11PixelShader* shaders[] = {ps.Get(), ps_sharp.Get(), ps.Get(), ps_bicubic.Get(), ps_lanczos.Get(), ps_cas.Get()};
         context->PSSetShaderResources(0, 1, &source);
+        auto set_tone = [&](float cover_x, float cover_y) {
+            D3D11_MAPPED_SUBRESOURCE map;
+            if (SUCCEEDED(context->Map(tone_cb.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+                const float tone[4] = {brightness.load(), 1.0f / std::max(0.1f, gamma.load()), cover_x, cover_y};
+                std::memcpy(map.pData, tone, sizeof tone);
+                context->Unmap(tone_cb.Get(), 0);
+            }
+            context->PSSetConstantBuffers(1, 1, tone_cb.GetAddressOf());
+        };
+        context->PSSetSamplers(0, 1, linear.GetAddressOf());
+        if (bars) {  // the blurred frame over the whole window first, the picture over it
+            D3D11_VIEWPORT whole = {0.0f, 0.0f, float(back_w), float(back_h), 0.0f, 1.0f};
+            context->RSSetViewports(1, &whole);
+            const float shape = float(frame_w) / float(frame_h), window = float(back_w) / float(back_h);
+            set_tone(window < shape ? window / shape : 1.0f, window > shape ? shape / window : 1.0f);
+            context->PSSetShader(ps_blur.Get(), nullptr, 0);
+            context->Draw(3, 0);
+            context->RSSetViewports(1, &vp);
+        }
+        set_tone(1.0f, 1.0f);
+        context->PSSetShader(shaders[mode >= 0 && mode < 6 ? mode : 0], nullptr, 0);
         // Smooth is bilinear at every size, whole multiples included; only Pixels takes the nearest texel.
         ID3D11SamplerState* sampler = mode == 2 ? point.Get() : linear.Get();
         context->PSSetSamplers(0, 1, &sampler);
         context->Draw(3, 0);
         ID3D11ShaderResourceView* none = nullptr;
         context->PSSetShaderResources(0, 1, &none);  // the scene texture is a render target again next frame
-        swap->Present(wait ? 1 : 0, 0);
+        swap->Present(wait && vsync.load() ? 1 : 0, 0);
     }
 
     void set_item(const ItemConstants& c) {
@@ -275,10 +371,6 @@ struct D3DPresenter::Impl {
         context->VSSetConstantBuffers(0, 1, item_cb.GetAddressOf());
         context->PSSetConstantBuffers(0, 1, item_cb.GetAddressOf());
         for (const DrawItem& obj : scene.items) {
-            if (obj.snow) {
-                draw_snow(obj);
-                continue;
-            }
             double alpha = std::min(obj.alpha, 1.0);
             if (alpha <= 0) continue;
             double rx = obj.rect[0], ry = obj.rect[1], rw = obj.rect[2], rh = obj.rect[3];
@@ -357,29 +449,6 @@ struct D3DPresenter::Impl {
         ID3D11ShaderResourceView* none = nullptr;
         context->PSSetShaderResources(1, 1, &none);
     }
-
-    // `paint_snow` (smooth path): every flake is a square that covers parts of up to four pixels.
-    void draw_snow(const DrawItem& item) {
-        double a = std::min(item.alpha, 1.0);
-        if (a <= 0 || !item.flakes) return;
-        context->OMSetBlendState(blend_normal.Get(), nullptr, 0xFFFFFFFF);
-        context->PSSetShader(ps_flake.Get(), nullptr, 0);
-        for (const SnowFlake& f : *item.flakes) {
-            double fx = f.x + 320 + std::sin(item.clock / 40.0 + f.phase) * 6, fy = f.y + 224;
-            double s = f.size + 0.5;
-            int x0 = std::max(0, int(std::floor(fx))), x1 = std::min(SCREEN_W, int(std::floor(fx + s)) + 1);
-            int y0 = std::max(0, int(std::floor(fy))), y1 = std::min(SCREEN_H, int(std::floor(fy + s)) + 1);
-            if (x0 >= x1 || y0 >= y1) continue;
-            ItemConstants c = {};
-            c.flake[0] = float(fx * scale);
-            c.flake[1] = float(fy * scale);
-            c.flake[2] = float(s * scale);
-            c.flake[3] = float(a * 0.8);
-            set_item(c);
-            scissor(x0 * scale, y0 * scale, x1 * scale, y1 * scale);
-            context->Draw(3, 0);
-        }
-    }
 };
 
 D3DPresenter::D3DPresenter() : impl(new Impl) {}
@@ -428,7 +497,12 @@ std::unique_ptr<D3DPresenter> D3DPresenter::create(HWND window, int frame_w, int
         }
         return SUCCEEDED(m.device->CreatePixelShader(code->GetBufferPointer(), code->GetBufferSize(), nullptr, &out));
     };
-    if (!make_ps("ps", m.ps) || !make_ps("ps_sharp", m.ps_sharp) || !make_ps("ps_item", m.ps_item) || !make_ps("ps_flake", m.ps_flake)) return nullptr;
+    if (!make_ps("ps", m.ps) || !make_ps("ps_sharp", m.ps_sharp) || !make_ps("ps_item", m.ps_item)) return nullptr;
+    // The extra filters are optional: if one does not compile on this driver the window falls back to smooth.
+    if (!make_ps("ps_bicubic", m.ps_bicubic)) m.ps_bicubic = m.ps;
+    if (!make_ps("ps_lanczos", m.ps_lanczos)) m.ps_lanczos = m.ps;
+    if (!make_ps("ps_cas", m.ps_cas)) m.ps_cas = m.ps;
+    if (!make_ps("ps_blur", m.ps_blur)) m.ps_blur = m.ps;
 
     // The software frame (a dynamic texture) and the scene (a render target), both the size of the game's frame.
     D3D11_TEXTURE2D_DESC td = {};
@@ -467,6 +541,8 @@ std::unique_ptr<D3DPresenter> D3DPresenter::create(HWND window, int frame_w, int
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     if (FAILED(m.device->CreateBuffer(&bd, nullptr, &m.item_cb))) return nullptr;
+    bd.ByteWidth = 16;
+    if (FAILED(m.device->CreateBuffer(&bd, nullptr, &m.tone_cb))) return nullptr;
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = D3D11_FILL_SOLID;
     rd.CullMode = D3D11_CULL_NONE;
@@ -584,6 +660,14 @@ size_t D3DPresenter::take_uploaded_bytes() {
 
 void D3DPresenter::set_aspect(int mode) {
     impl->aspect = mode;
+    redraw();
+}
+
+void D3DPresenter::set_vsync(bool on) { impl->vsync = on; }
+
+void D3DPresenter::set_tone(float brightness, float gamma) {
+    impl->brightness = brightness;
+    impl->gamma = gamma;
     redraw();
 }
 

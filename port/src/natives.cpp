@@ -20,6 +20,7 @@
 #include <stdexcept>
 
 #include "gfx.hpp"
+#include "mouse_menus.hpp"
 #include "paths.hpp"
 #include "port_settings.hpp"
 #include "vm.hpp"
@@ -73,39 +74,6 @@ std::filesystem::path save_dir(const VM& vm) {
     if (!vm.save_dir.empty()) return std::filesystem::u8path(vm.save_dir);
     if (const char* e = std::getenv("AMG_SAVE_DIR"); e && *e) return e;
     return amg::paths::save_dir();
-}
-
-std::filesystem::path slot_file(const VM& vm, int slot, const char* ext) {
-    char name[32];
-    std::snprintf(name, sizeof name, "slot%02d.%s", slot, ext);
-    return save_dir(vm) / name;
-}
-
-// The end of one Serializer record (the scripts' Serializer class): tagged values until a 0 byte. 'N' nil and 'B'
-// boolean take one byte, 'I' integer and 'F' float four, 'S' a 4-byte little-endian length and the bytes, 'A' a
-// nested record. False if the record runs past the data or has an unknown tag.
-bool serial_end(const std::string& d, size_t pos, size_t& end) {
-    while (pos < d.size()) {
-        char tag = d[pos++];
-        if (tag == 0) {
-            end = pos;
-            return true;
-        }
-        if (tag == 'N' || tag == 'B') {
-            pos += 1;
-        } else if (tag == 'I' || tag == 'F') {
-            pos += 4;
-        } else if (tag == 'S') {
-            if (pos + 4 > d.size()) return false;
-            pos += 4 + (size_t(uint8_t(d[pos])) | (size_t(uint8_t(d[pos + 1])) << 8) | (size_t(uint8_t(d[pos + 2])) << 16) |
-                        (size_t(uint8_t(d[pos + 3])) << 24));
-        } else if (tag == 'A') {
-            if (!serial_end(d, pos, pos)) return false;
-        } else {
-            return false;
-        }
-    }
-    return false;
 }
 
 void put_le(std::string& s, uint32_t v, int n) {
@@ -738,18 +706,122 @@ void install_natives(VM& vm) {
         vm.out.push_back(text_of(vm, th, a[0]));
         return Value();
     };
+    // --- PortMessage: the card's message box (MemoryCard primitives 10 and 11) ------------------------------------------
+    // fallback(kind): the line of the game's own message table (MemoryCard's, the same in every layer's order) for a
+    // status whose printStatus* line is empty, which on the console the system dialog covered: a failed read of a
+    // save that exists (status 2). 15 "loading failed" for LoadMenu, 11 "save failed" for the saves, 19 "system data
+    // loading failed" at boot. "" when the table is not there.
+    if (vm.sources.count("PortMessage")) {
+        reg("PortMessage", "fallback", 1, NATIVE {
+            UNUSED;
+            ClassObj* cls = vm.find_class("MemoryCard");
+            size_t line = a[0].tag == Tag::Int && a[0].i == 1 ? 15 : a[0].tag == Tag::Int && a[0].i == 2 ? 11 : 19;
+            if (cls && cls->src)
+                for (const auto& c : cls->src->constants)
+                    if (c.tag == 8 && c.items.size() > line && c.items[0].tag == 5 && c.items[line].tag == 5)
+                        return vm.make_str(c.items[line].s);
+            return vm.make_str("");
+        }, true);
+    }
+    // --- PortMouse: the native mouse's select thread (port/script/PortMouse.scfs, src/mouse_menus.hpp) ----------------
+    if (vm.sources.count("PortMouse")) {
+        reg("PortMouse", "mirror", 1, NATIVE {
+            UNUSED;
+            amg::mouse_menus_mirror(vm, a[0]);
+            return Value();
+        }, true);
+    }
     // --- PortSettings: the port's rows in the game's Settings screen (port/script, src/port_settings.hpp) ---------------
     if (vm.sources.count("PortSettings")) {
-        reg("PortSettings", "count", 0, NATIVE {
+        // The rows must look like the game's own in whatever layer is loaded (the original Japanese, or the English
+        // patch, which sets its own font size): read the size and the language from the game's ConfigSwitch, the class
+        // that draws those rows, the first time a row is asked for.
+        static auto layer = [](VM& vm) {
+            static bool done = false;
+            if (done) return;
+            done = true;
+            ClassObj* cls = vm.find_class("ConfigSwitch");
+            if (!cls || !cls->src) return;
+            bool japanese = false;
+            int pitch = 18;
+            for (const auto& c : cls->src->constants) {
+                if (c.tag != 8 || c.items.empty()) continue;
+                if (c.items[0].tag == 5) {  // the titles: kanji or kana (lead bytes 0x88 and up) mean the Japanese text
+                    for (const auto& title : c.items)
+                        for (size_t i = 0; i + 1 < title.s.size(); ++i) {
+                            unsigned char lead = (unsigned char)title.s[i];
+                            if (lead >= 0x88 && lead != 0xFF) japanese = true;
+                            if (lead >= 0x81) ++i;
+                        }
+                } else if (c.items.size() == 5 && c.items[1].tag == 8 && !c.items[1].items.empty() && c.items[1].items[0].tag == 3) {
+                    pitch = int(18.0f * c.items[1].items[0].f);  // the size scale of the game's row titles
+                }
+            }
+            amg::port_settings::set_layer(japanese, pitch);
+        };
+        reg("PortSettings", "tabs", 0, NATIVE {
             UNUSED;
-            return Value::integer(amg::port_settings::count());
+            return Value::integer(amg::port_settings::tabs());
+        }, true);
+        reg("PortSettings", "tabRows", 1, NATIVE {
+            UNUSED;
+            return Value::integer(amg::port_settings::tab_rows(int(a[0].i)));
+        }, true);
+        reg("PortSettings", "tabRow", 2, NATIVE {
+            UNUSED;
+            return Value::integer(amg::port_settings::tab_row(int(a[0].i), int(a[1].i)));
+        }, true);
+        reg("PortSettings", "tabTitle", 1, NATIVE {
+            UNUSED;
+            layer(vm);
+            return vm.make_str(amg::port_settings::tab_title(int(a[0].i)));
+        }, true);
+        reg("PortSettings", "menuLabel", 0, NATIVE {
+            UNUSED;
+            layer(vm);
+            return vm.make_str(amg::port_settings::menu_label());
+        }, true);
+        reg("PortSettings", "reset", 1, NATIVE {
+            UNUSED;
+            amg::port_settings::reset(int(a[0].i));
+            return Value();
+        }, true);
+        // A game object's instance variable by its name (field / setField): the port's classes reach into the game's
+        // (CommandMenu's icons, ConfigDialog's pages) without depending on the slot numbers of one release or layer.
+        static auto slot_of = [](const Value& obj, const Value& name) -> Value* {
+            if (obj.tag != Tag::Obj || (name.tag != Tag::Str && name.tag != Tag::Sym)) return nullptr;
+            auto* o = static_cast<ObjObj*>(obj.p.get());
+            const std::string& wanted = name.tag == Tag::Str ? static_cast<StrObj*>(name.p.get())->b
+                                                             : static_cast<SymObj*>(name.p.get())->name;
+            for (ClassObj* c = o->cls; c; c = c->parent)
+                if (c->src)
+                    for (const auto& [slot, n] : c->src->instance_vars)
+                        if (n == wanted && slot >= 0 && size_t(slot) < o->iv.size()) return &o->iv[size_t(slot)];
+            return nullptr;
+        };
+        reg("PortSettings", "field", 2, NATIVE {
+            UNUSED;
+            Value* v = slot_of(a[0], a[1]);
+            return v ? *v : Value();
+        }, true);
+        reg("PortSettings", "setField", 3, NATIVE {
+            UNUSED;
+            if (Value* v = slot_of(a[0], a[1])) *v = a[2];
+            return Value();
+        }, true);
+        reg("PortSettings", "pitch", 0, NATIVE {
+            UNUSED;
+            layer(vm);
+            return Value::integer(amg::port_settings::pitch());
         }, true);
         reg("PortSettings", "label", 1, NATIVE {
             UNUSED;
+            layer(vm);
             return vm.make_str(amg::port_settings::label(int(a[0].i)));
         }, true);
         reg("PortSettings", "text", 1, NATIVE {
             UNUSED;
+            layer(vm);
             return vm.make_str(amg::port_settings::text(int(a[0].i)));
         }, true);
         reg("PortSettings", "step", 2, NATIVE {
@@ -1091,7 +1163,7 @@ void install_natives(VM& vm) {
     // the PS2 values its scripts test (`& 32768`, `& 16`), while the system image tests SceCtrl's. How the
     // eboot tells them apart is not known: the caller's class is the rule used here (hypothesis, F4-52).
     auto caller_is_scenario = [](VM& v, Thread& t) {
-        if (!v.vita_buttons || t.frames.size() < 2) return false;
+        if (t.frames.size() < 2) return false;
         const Method* caller = t.frames[t.frames.size() - 2].method;
         return caller && caller->cls && !v.image_classes.count(caller->cls->name);
     };
@@ -1101,33 +1173,33 @@ void install_natives(VM& vm) {
     prim("ControlPad", 1, [caller_is_scenario](VM& v, Thread& t, std::vector<Value>&, size_t, Method&) {
         return Value::integer(v.buttons_pressed(caller_is_scenario(v, t)));
     });
-    prim("ControlPad", 3, [](VM&, Thread&, std::vector<Value>&, size_t, Method&) { return Value::integer(0); });
-    // 5 rapid: the newly pressed buttons plus the engine's auto-repeat, the PS2's or the Vita's (VM::buttons_rapid).
-    prim("ControlPad", 5, [caller_is_scenario](VM& v, Thread& t, std::vector<Value>&, size_t, Method&) {
+    prim("ControlPad", 4, [](VM&, Thread&, std::vector<Value>&, size_t, Method&) { return Value::integer(0); });
+    // 2 rapid: the newly pressed buttons plus the engine's auto-repeat (VM::buttons_rapid).
+    prim("ControlPad", 2, [caller_is_scenario](VM& v, Thread& t, std::vector<Value>&, size_t, Method&) {
         return Value::integer(v.buttons_rapid(caller_is_scenario(v, t)));
     });
-    // 2 analog(n) (0x10C7D8, read; Vita 0x81001D50): axis n for 0 to 3, as a signed value centred on 0; on Vita
+    // 5 analog(n) (Vita 0x81001D50): axis n for 0 to 3, as a signed value centred on 0; on Vita
     // 4 and 5 are the left and right stick's length, int(sqrt(x*x + y*y)) (the map reads analog(4)), anything else
     // 0. It used to answer 128, a stick pushed fully over, which scrolled the album's tall pictures on their own
     // (A0_album#UpDown).
-    prim("ControlPad", 2, [](VM& v, Thread&, std::vector<Value>& st, size_t b, Method&) {
+    prim("ControlPad", 5, [](VM& v, Thread&, std::vector<Value>& st, size_t b, Method&) {
         int64_t n = st[b + 1].tag == Tag::Int ? st[b + 1].i : 0;
         auto axis = [&](int64_t k) { return v.tick < v.analog_from ? 0 : v.analog[k]; };
         if (n >= 0 && n < 4) return Value::integer(axis(n));
-        if (v.vita_buttons && (n == 4 || n == 5)) {
+        if (n == 4 || n == 5) {
             double x = axis((n - 4) * 2), y = axis((n - 4) * 2 + 1);
             return Value::integer(int64_t(float(std::sqrt(float(x * x + y * y)))));
         }
         return Value::integer(0);
     });
-    // 4 actPausePrim(level, on): vibration (ControlPad.scfs, two arguments). 6 resetRapid (no arguments): restarts the
-    // auto-repeat count (Vita 0x8107CB44 clears it). They used to be the other way round, so rumble never ran.
-    prim("ControlPad", 4, [](VM& v, Thread&, std::vector<Value>& st, size_t b, Method&) {
+    // 6 actPausePrim(level, on): vibration (ControlPad.scfs, two arguments). 3 resetRapid (no arguments): restarts the
+    // auto-repeat count (Vita 0x8107CB44 clears it). 4 is the pressure, always 0.
+    prim("ControlPad", 6, [](VM& v, Thread&, std::vector<Value>& st, size_t b, Method&) {
         if (v.on_rumble && st.size() > b + 2) v.on_rumble(double(st[b + 1].i) / 255.0, st[b + 2].i != 0);
         return st[b];
     });
-    prim("ControlPad", 6, [](VM& v, Thread&, std::vector<Value>& st, size_t b, Method&) {
-        v.rapid_count = v.rapid_count_ps2 = 0;
+    prim("ControlPad", 3, [](VM& v, Thread&, std::vector<Value>& st, size_t b, Method&) {
+        v.rapid_count = 0;
         return st[b];
     });
     // The image declares `ByteArray : Object`, but the save scripts need it to be an
@@ -1141,103 +1213,22 @@ void install_natives(VM& vm) {
     // Voice.length(n) without a sound engine: no voice, so no text pacing to follow (frames).
     prim("Voice", 5, [](VM&, Thread&, std::vector<Value>&, size_t, Method&) { return Value::integer(0); });
     prim("MemoryCard", 0, [](VM&, Thread&, std::vector<Value>&, size_t, Method&) { return Value::boolean(false); });
-    // 1 status: 2 (ready, ebKore+ save present) once system.bin exists, else 6 (usable, no save yet).
+    // 1 status: 2 (ready, ebKore+ save present) once the system data exists, else 6 (usable, no save yet).
     prim("MemoryCard", 1, [](VM& v, Thread&, std::vector<Value>&, size_t, Method&) {
         // AMG_CARD_STATUS=N forces the answer (tests of the Vita's card error paths, tests/cases/Y5, Y6: 7 broken,
         // 3 or 5 no room, 1 no card); the real card never reports them here.
         if (const char* forced = std::getenv("AMG_CARD_STATUS")) return Value::integer(std::atoi(forced));
         std::error_code ec;
-        bool any = std::filesystem::exists(save_dir(v) / "system.bin", ec) ||
-                   std::filesystem::exists(save_dir(v) / "vita_system.bin", ec);  // the Vita's own (see below)
+        bool any = std::filesystem::exists(save_dir(v) / "vita_system.bin", ec);
         return Value::integer(any ? 2 : 6);
     });
-    // 2 createFileSystemPrim: create the folder.
-    prim("MemoryCard", 2, [](VM& v, Thread&, std::vector<Value>&, size_t, Method&) {
-        std::error_code ec;
-        std::filesystem::create_directories(save_dir(v), ec);
-        return Value::integer(std::filesystem::is_directory(save_dir(v), ec) ? 0 : SAVE_ERR_IO);
-    });
-    // 3 format: nothing to format.
-    prim("MemoryCard", 3, [](VM&, Thread&, std::vector<Value>&, size_t, Method&) { return Value::integer(0); });
-    // 4 readSystemData(buf)
-    prim("MemoryCard", 4, [](VM& v, Thread&, std::vector<Value>& st, size_t b, Method&) {
-        if (!is_byte_array(v, st[b + 1])) return Value::integer(SAVE_ERR_ARG);
-        std::string payload;
-        int rc = read_save(save_dir(v) / "system.bin", KIND_SYSTEM, payload);
-        return Value::integer(rc ? rc : fill_buffer(st[b + 1], payload));
-    });
-    // 5 readShioriHeadPrim(buf): 20 headers of 256 bytes; a missing slot stays zero (unused).
-    prim("MemoryCard", 5, [](VM& v, Thread&, std::vector<Value>& st, size_t b, Method&) {
-        if (!is_byte_array(v, st[b + 1])) return Value::integer(SAVE_ERR_ARG);
-        for (int s = 0; s < SAVE_SLOTS; ++s) {
-            std::string payload;
-            int rc = read_save(slot_file(v, s, "head"), KIND_HEAD, payload);
-            if (rc == SAVE_ERR_MISSING) payload.clear();
-            else if (rc) return Value::integer(rc);
-            rc = fill_buffer(st[b + 1], payload, size_t(s) * SAVE_HEAD_SIZE, SAVE_HEAD_SIZE);
-            if (rc) return Value::integer(rc);
-        }
-        return Value::integer(0);
-    });
-    // 6 writeAllData(slot, head, body, system)
-    prim("MemoryCard", 6, [](VM& v, Thread&, std::vector<Value>& st, size_t b, Method&) {
-        const Value& slot = st[b + 1];
-        if (slot.tag != Tag::Int || slot.i < 0 || slot.i >= SAVE_SLOTS) return Value::integer(SAVE_ERR_ARG);
-        for (int k = 2; k <= 4; ++k)
-            if (!is_byte_array(v, st[b + k])) return Value::integer(SAVE_ERR_ARG);
-        std::string head = bytes_of(st[b + 2]);
-        if (head.size() > size_t(SAVE_HEAD_SIZE)) return Value::integer(SAVE_ERR_BAD);
-        // The engine (0x10CAE0, read) takes the console's clock and writes month, day, hour and minute into the
-        // serialized header, over the low bytes of ShioriData's four `update` integers (offsets 2, 7, 12 and 17),
-        // which the script leaves at 0; the load screen shows them as MM/DD hh:mm. The port uses the PC's local time.
-        if (head.size() >= 18) {
-            std::time_t now = std::time(nullptr);
-            std::tm local{};
-#ifdef _WIN32
-            localtime_s(&local, &now);
-#else
-            localtime_r(&now, &local);
-#endif
-            head[2] = char(local.tm_mon + 1);
-            head[7] = char(local.tm_mday);
-            head[12] = char(local.tm_hour);
-            head[17] = char(local.tm_min);
-        }
-        int s = int(slot.i);
-        // Body first and system last: a header only ever points at a body already on disk.
-        bool ok = write_save(slot_file(v, s, "body"), KIND_BODY, bytes_of(st[b + 3])) &&
-                  write_save(slot_file(v, s, "head"), KIND_HEAD, head) &&
-                  write_save(save_dir(v) / "system.bin", KIND_SYSTEM, bytes_of(st[b + 4]));
-        return Value::integer(ok ? 0 : SAVE_ERR_IO);
-    });
-    // 7 readShioriBody(slot, buf)
-    prim("MemoryCard", 7, [](VM& v, Thread&, std::vector<Value>& st, size_t b, Method&) {
-        const Value& slot = st[b + 1];
-        if (slot.tag != Tag::Int || slot.i < 0 || slot.i >= SAVE_SLOTS || !is_byte_array(v, st[b + 2]))
-            return Value::integer(SAVE_ERR_ARG);
-        std::string payload;
-        int rc = read_save(slot_file(v, int(slot.i), "body"), KIND_BODY, payload);
-        return Value::integer(rc ? rc : fill_buffer(st[b + 2], payload));
-    });
-    // 8 writeSystemData(buf)
-    prim("MemoryCard", 8, [](VM& v, Thread&, std::vector<Value>& st, size_t b, Method&) {
-        if (!is_byte_array(v, st[b + 1])) return Value::integer(SAVE_ERR_ARG);
-        bool ok = write_save(save_dir(v) / "system.bin", KIND_SYSTEM, bytes_of(st[b + 1]));
-        return Value::integer(ok ? 0 : SAVE_ERR_IO);
-    });
-    // 9 hasOldData, 10 succeedOldData: no import of original Amagami saves yet.
-    prim("MemoryCard", 9, [](VM&, Thread&, std::vector<Value>&, size_t, Method&) { return Value::boolean(false); });
-    prim("MemoryCard", 10, [](VM&, Thread&, std::vector<Value>&, size_t, Method&) { return Value::integer(SAVE_ERR_MISSING); });
     // PS Vita system image (D-020): MemoryCard has its own primitive numbers and signatures (read from its
     // methods and their callers, docs/technical/vita-cpk-format.md). The trailing flag some take (a "quiet"
-    // switch, hypothesis) is ignored. The Vita keeps its own files (vita_*), so a save made with it never
-    // overwrites the PS2's in the same folder; when it has none yet, it reads the PS2's (see primitive 6).
-    if (amg::is_vita(vm.root)) {
+    // switch, hypothesis) is ignored. The files are the save folder's vita_* ones.
+    {
         auto vita_file = [](const VM& v, const std::string& name) { return save_dir(v) / ("vita_" + name); };
-        // The system data: the Vita's file, else the PS2's (the same 49,152-byte layout).
         auto read_system = [vita_file](const VM& v, std::string& payload) {
-            int rc = read_save(vita_file(v, "system.bin"), KIND_SYSTEM, payload);
-            return rc == SAVE_ERR_MISSING ? read_save(save_dir(v) / "system.bin", KIND_SYSTEM, payload) : rc;
+            return read_save(vita_file(v, "system.bin"), KIND_SYSTEM, payload);
         };
         // 2 checkData(flag): the script then asks the card itself (checkData().isOK()).
         prim("MemoryCard", 2, [](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) { return st[b]; });
@@ -1259,36 +1250,11 @@ void install_natives(VM& vm) {
             return Value::integer(rc ? rc : fill_buffer(st[b + 1], payload));
         });
         // 6 readShioriHeadPrim(buf, flag): the Vita keeps every slot's header in one Serializer record,
-        // [slot 0, ..., slot 19, checksums] (ShioriData.serialize); the PS2, one 256-byte record per slot. Without
-        // a Vita file the PS2's are put together into that shape: each slot's record nested as an array ('A' and
-        // the record, which ends in its own 0), a missing slot as nil ('N' and one byte, which the Vita
-        // initialises), then the 20 checksums as zeros (only readShioriBody gets them, and it does not check them).
+        // [slot 0, ..., slot 19, checksums] (ShioriData.serialize).
         prim("MemoryCard", 6, [vita_file](VM& v, Thread&, std::vector<Value>& st, size_t b, Method&) {
             if (!is_byte_array(v, st[b + 1])) return Value::integer(SAVE_ERR_ARG);
             std::string payload;
             int rc = read_save(vita_file(v, "heads.bin"), KIND_HEAD, payload);
-            if (rc == SAVE_ERR_MISSING) {
-                payload.clear();
-                for (int s = 0; s < SAVE_SLOTS; ++s) {
-                    std::string head;
-                    size_t end = 0;
-                    if (read_save(slot_file(v, s, "head"), KIND_HEAD, head) == 0 && serial_end(head, 0, end)) {
-                        payload += 'A';
-                        payload += head.substr(0, end);
-                    } else {
-                        payload += 'N';
-                        payload += '\0';
-                    }
-                }
-                payload += 'A';
-                for (int s = 0; s < SAVE_SLOTS; ++s) {
-                    payload += 'I';
-                    payload += std::string(4, '\0');
-                }
-                payload += '\0';
-                payload += '\0';
-                rc = 0;
-            }
             return Value::integer(rc ? rc : fill_buffer(st[b + 1], payload));
         });
         // 7 writeShioriData(heads, body, slot): every slot's header (ShioriData.serialize) and this slot's body.
@@ -1303,8 +1269,7 @@ void install_natives(VM& vm) {
                       write_save(vita_file(v, "heads.bin"), KIND_HEAD, bytes_of(st[b + 1]));
             return Value::integer(ok ? 0 : SAVE_ERR_IO);
         });
-        // 8 readShioriBody(buf, slot, checksum): the Vita's file, else the PS2's (256 bytes shorter; the rest of
-        // the buffer stays zero; hypothesis that the Vita reads it). The checksum is not checked.
+        // 8 readShioriBody(buf, slot, checksum): the checksum is not checked.
         prim("MemoryCard", 8, [vita_file](VM& v, Thread&, std::vector<Value>& st, size_t b, Method&) {
             const Value& slot = st[b + 2];
             if (slot.tag != Tag::Int || slot.i < 0 || slot.i >= SAVE_SLOTS || !is_byte_array(v, st[b + 1]))
@@ -1313,14 +1278,43 @@ void install_natives(VM& vm) {
             std::snprintf(body, sizeof body, "slot%02d.body", int(slot.i));
             std::string payload;
             int rc = read_save(vita_file(v, body), KIND_BODY, payload);
-            if (rc == SAVE_ERR_MISSING) rc = read_save(slot_file(v, int(slot.i), "body"), KIND_BODY, payload);
             return Value::integer(rc ? rc : fill_buffer(st[b + 1], payload));
         });
         // 9 selectDeleteAllSaveData: the console's "delete broken data" dialog; nothing is deleted here.
         prim("MemoryCard", 9, [](VM&, Thread&, std::vector<Value>&, size_t, Method&) { return Value::integer(0); });
-        // 10 displaySysMsg, 11 waitSysMsgEnd: the console's own message box; none, so it ends at once.
-        prim("MemoryCard", 10, [](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) { return st[b]; });
-        prim("MemoryCard", 11, [](VM&, Thread&, std::vector<Value>&, size_t, Method&) { return Value::boolean(false); });
+        // 10 displaySysMsg, 11 waitSysMsgEnd: the console's own message box, chosen there by the card's status. The
+        // port shows it in the game's own look instead: a script thread runs PortMessage.show(card, kind)
+        // (port/script/PortMessage.scfs: a ConfirmDialog with the game's line for the status, until confirm or
+        // back), and 11 answers true while that thread lives, so the caller's own `while (waitSysMsgEnd()) sleep(1)`
+        // waits as on the console. The kind is the caller's: 1 LoadMenu (printStatusForLoad), 2 SaveMenu and
+        // SystemSave (printStatusForSave), 0 anything else, MemoryCardCheck at boot (printStatus). Without the
+        // port's scripts both end at once, as before.
+        static Thread* message = nullptr;
+        prim("MemoryCard", 10, [](VM& v, Thread& th, std::vector<Value>& st, size_t b, Method&) {
+            ClassObj* cls = v.find_class("PortMessage");
+            if (!cls) return st[b];
+            int kind = 0;
+            for (size_t i = th.frames.size(); i-- > 0;) {
+                const Method* m = th.frames[i].method;
+                if (!m || !m->cls || m->cls->name == "MemoryCard") continue;
+                const std::string& n = m->cls->name;
+                kind = n == "LoadMenu" ? 1 : (n == "SaveMenu" || n == "SystemSave") ? 2 : 0;
+                break;
+            }
+            Thread* t = v.new_thread(v.make_obj(cls), "show", {st[b], Value::integer(kind)}, "thread");
+            t->parent = &th;
+            t->wake_tick = v.tick;
+            t->start();
+            message = t;
+            return st[b];
+        });
+        prim("MemoryCard", 11, [](VM& v, Thread&, std::vector<Value>&, size_t, Method&) {
+            if (!message) return Value::boolean(false);
+            for (Thread* t : v.live_threads)
+                if (t == message && !t->done) return Value::boolean(true);
+            message = nullptr;
+            return Value::boolean(false);
+        });
     }
     prim("K2X_Script", 1, [](VM&, Thread&, std::vector<Value>&, size_t, Method&) { return Value::boolean(false); });
     prim("K2X_Script", 2, [](VM& v, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
@@ -1373,15 +1367,7 @@ void install_natives(VM& vm) {
 
     // PS Vita system image: primitive numbers that moved (found by matching method names between the two images,
     // docs/technical/vita-cpk-format.md) and the classes only the Vita has.
-    if (amg::is_vita(vm.root)) {
-        // ControlPad (class side): Vita 2 rapid, 3 resetRapid, 4 pressure, 5 analog, 6 actPausePrim; the PS2 has
-        // them at 5, 6, 3, 2, 4.
-        if (ClassObj* c = vm.find_class("ControlPad")) {
-            std::map<int, PrimFn> ps2 = c->prims;
-            const int from[][2] = {{2, 5}, {3, 6}, {4, 3}, {5, 2}, {6, 4}};
-            for (const auto& m : from)
-                if (ps2.count(m[1])) c->prims[m[0]] = ps2[m[1]];
-        }
+    {
         // TouchPanel: the touch screen, played by the mouse (VM::touch, F5-8). Rectangles are (x, y, width,
         // height) in the scripts' units, origin at the centre of the screen and (x, y) the rectangle's CENTRE
         // (hypothesis: the gallery's thumbnail columns are -175, -125 ... 175, symmetric about 0, and its drag

@@ -1,6 +1,5 @@
 #include "audio.hpp"
 
-#include "ahx.hpp"
 #include "at9.hpp"
 #include "datapath.hpp"
 #include "hca.hpp"
@@ -14,170 +13,21 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <chrono>
 #include <thread>
 
 namespace amg {
 
 namespace {
 
-uint32_t be32(const std::string& d, size_t at) {
-    return (uint32_t(uint8_t(d[at])) << 24) | (uint32_t(uint8_t(d[at + 1])) << 16) | (uint32_t(uint8_t(d[at + 2])) << 8) |
-           uint32_t(uint8_t(d[at + 3]));
-}
-uint16_t be16(const std::string& d, size_t at) { return uint16_t((uint8_t(d[at]) << 8) | uint8_t(d[at + 1])); }
 uint32_t le32(const std::string& d, size_t at) {
+    if (at + 4 > d.size()) return 0;
     return uint32_t(uint8_t(d[at])) | (uint32_t(uint8_t(d[at + 1])) << 8) | (uint32_t(uint8_t(d[at + 2])) << 16) |
            (uint32_t(uint8_t(d[at + 3])) << 24);
 }
 
-// The 1,024 primes above 2^14 that CRI's key derivation indexes (docs/technical/audio.md).
-const std::vector<int>& key_primes() {
-    static std::vector<int> primes;
-    if (primes.empty()) {
-        for (int n = 0x4001; primes.size() < 0x400; n += 2) {
-            bool prime = true;
-            for (int d = 3; d * d <= n; d += 2)
-                if (n % d == 0) {
-                    prime = false;
-                    break;
-                }
-            if (prime) primes.push_back(n);
-        }
-    }
-    return primes;
-}
-
-void derive_key(const std::string& text, int& start, int& mult, int& add) {
-    const auto& p = key_primes();
-    start = p[0x100];
-    mult = p[0x200];
-    add = p[0x300];
-    for (unsigned char c : text) {
-        int k = p[size_t(c) + 0x80];
-        start = p[size_t(start) * size_t(k) % 0x400];
-        mult = p[size_t(mult) * size_t(k) % 0x400];
-        add = p[size_t(add) * size_t(k) % 0x400];
-    }
-}
-
 }  // namespace
 
-bool Afs::open(const std::string& file) {
-    path = file;
-    std::ifstream f(file, std::ios::binary);
-    if (!f) return false;
-    char head[8];
-    f.read(head, 8);
-    if (std::memcmp(head, "AFS\0", 4) != 0) return false;
-    uint32_t n = le32(std::string(head, 8), 4);
-    std::string table(size_t(n) * 8, '\0');
-    f.read(table.data(), std::streamsize(table.size()));
-    files.clear();
-    for (uint32_t i = 0; i < n; ++i) files.emplace_back(le32(table, i * 8), le32(table, i * 8 + 4));
-    return true;
-}
-
-bool Afs::read(size_t index, std::string& out) const {
-    if (index >= files.size()) return false;
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return false;
-    f.seekg(files[index].first);
-    out.resize(files[index].second);
-    f.read(out.data(), std::streamsize(out.size()));
-    return true;
-}
-
-bool AdxStream::load(const std::string& path, uint32_t offset, uint32_t size, const std::string& key) {
-    file.open(path, std::ios::binary);
-    if (!file) return false;
-    base = std::streamoff(offset);
-    data.resize(std::min<uint32_t>(size, 0x200));
-    file.seekg(base);
-    file.read(data.data(), std::streamsize(data.size()));
-    if (data.size() < 0x40 || uint8_t(data[0]) != 0x80 || data[1] != 0) return false;
-    uint32_t copyright = be16(data, 2);
-    int encoding = uint8_t(data[4]);
-    block_size = uint8_t(data[5]);
-    int bits = uint8_t(data[6]);
-    channels = uint8_t(data[7]);
-    rate = int(be32(data, 8));
-    samples = be32(data, 12);
-    int highpass = be16(data, 16);
-    int version = uint8_t(data[18]);
-    int flags = uint8_t(data[19]);
-    if (encoding != 3 || bits != 4 || channels < 1 || channels > 2) return false;
-    data_offset = copyright + 4;
-    encrypted = (flags & 0x08) != 0;
-    size_t loop_base = version == 3 ? 0x18 : version == 4 ? 0x24 : 0;
-    if (loop_base && loop_base + 0x14 <= copyright) {
-        if (be32(data, loop_base) != 0) {
-            looped = true;
-            loop_start = be32(data, loop_base + 4);
-            loop_end = be32(data, loop_base + 12);
-        }
-    }
-    double a = std::sqrt(2.0) - std::cos(2.0 * 3.14159265358979323846 * highpass / rate);
-    double b = std::sqrt(2.0) - 1.0;
-    double c = (a - std::sqrt((a + b) * (a - b))) / b;
-    coef1 = int(std::lrint(c * 8192.0));
-    coef2 = int(std::lrint(-(c * c) * 4096.0));
-    if (encrypted) derive_key(key, xor_start, xor_mult, xor_add);
-    rewind_to(0);
-    return true;
-}
-
-void AdxStream::rewind_to(uint32_t sample) {
-    block_index = sample / 32;
-    xor_state = xor_start;
-    if (encrypted)
-        for (uint32_t i = 0; i < block_index * uint32_t(channels); ++i) xor_state = (xor_state * xor_mult + xor_add) & 0x7FFF;
-    h1.assign(size_t(channels), 0);
-    h2.assign(size_t(channels), 0);
-    frames.clear();
-    cursor = 0;
-    position = block_index * 32;
-    ended = false;
-    decode_block();
-    cursor = std::min<size_t>(sample % 32, frames.size() / size_t(channels));
-    position = sample;
-}
-
-void AdxStream::decode_block() {
-    frames.clear();
-    cursor = 0;
-    uint32_t done = block_index * 32;
-    if (done >= samples) return;
-    uint32_t count = std::min<uint32_t>(32, samples - done);
-    std::streamoff pos = base + std::streamoff(data_offset) + std::streamoff(block_index) * block_size * channels;
-    frames.assign(size_t(count) * size_t(channels), 0);
-    uint8_t raw[2 * 64];
-    file.clear();
-    file.seekg(pos);
-    for (int ch = 0; ch < channels; ++ch) {
-        file.read(reinterpret_cast<char*>(raw), block_size);
-        if (file.gcount() != block_size) {
-            frames.clear();
-            return;
-        }
-        const uint8_t* block = raw;
-        int scale = ((((block[0] << 8) | block[1]) ^ xor_state) & 0x1FFF) + 1;
-        if (encrypted) xor_state = (xor_state * xor_mult + xor_add) & 0x7FFF;
-        int s1 = h1[size_t(ch)], s2 = h2[size_t(ch)];
-        for (uint32_t i = 0; i < count; ++i) {
-            int byte = block[2 + (i >> 1)];
-            int nibble = (i & 1) ? (byte & 0x0F) : (byte >> 4);
-            if (nibble & 8) nibble -= 16;
-            int sample = nibble * scale + ((coef1 * s1 + coef2 * s2) >> 12);
-            sample = std::max(-32768, std::min(32767, sample));
-            frames[size_t(i) * size_t(channels) + size_t(ch)] = int16_t(sample);
-            s2 = s1;
-            s1 = sample;
-        }
-        h1[size_t(ch)] = s1;
-        h2[size_t(ch)] = s2;
-    }
-    ++block_index;
-}
 
 bool AdxStream::load_wav(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
@@ -221,7 +71,6 @@ bool AdxStream::load_wav(const std::string& path) {
     cursor = 0;
     position = 0;
     ended = false;
-    pcm_only = true;
     return true;
 }
 
@@ -238,174 +87,31 @@ bool AdxStream::load_atrac9(const std::string& riff) {
     cursor = 0;
     position = 0;
     ended = false;
-    pcm_only = true;
     return true;
 }
 
 bool AdxStream::next(int16_t& l, int16_t& r) {
     if (ended) return false;
-    if (pcm_only) {
-        if (looped && position >= loop_end) {
-            cursor = size_t(loop_start);
-            position = loop_start;
-        }
-        if (cursor >= frames.size() / size_t(channels)) {
-            if (looped) {
-                cursor = size_t(loop_start);
-                position = loop_start;
-            } else {
-                ended = true;
-                return false;
-            }
-        }
-        l = frames[cursor * size_t(channels)];
-        r = channels > 1 ? frames[cursor * size_t(channels) + 1] : l;
-        ++cursor;
-        ++position;
-        return true;
-    }
     if (looped && position >= loop_end) {
-        rewind_to(loop_start);
+        cursor = size_t(loop_start);
+        position = loop_start;
     }
     if (cursor >= frames.size() / size_t(channels)) {
-        decode_block();
-        if (frames.empty()) {
+        if (!looped) {
             ended = true;
             return false;
         }
+        cursor = size_t(loop_start);
+        position = loop_start;
     }
     l = frames[cursor * size_t(channels)];
     r = channels > 1 ? frames[cursor * size_t(channels) + 1] : l;
     ++cursor;
     ++position;
-    if (!looped && position >= samples) ended = true;
     return true;
 }
 
 // ---------------------------------------------------------------------------------------------
-
-namespace {
-
-uint32_t name_hash(const std::string& name) {
-    uint32_t h = 0;
-    for (unsigned char c : name) h = h * 16301u + c;
-    return h;
-}
-
-// One entry of an ARC archive by file name (docs/technical/arc-format.md).
-bool arc_entry(const std::string& path, const std::string& name, std::string& out) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return false;
-    char head[8];
-    f.read(head, 8);
-    uint32_t n = le32(std::string(head, 8), 0);
-    f.seekg(8 + 4 * std::streamoff(n));
-    std::string table(16 * size_t(n), '\0');
-    f.read(table.data(), std::streamsize(table.size()));
-    uint32_t h = name_hash(name);
-    for (uint32_t i = 0; i < n; ++i) {
-        if (le32(table, 16 * i + 4) != h) continue;
-        uint32_t off = le32(table, 16 * i + 8), size = le32(table, 16 * i + 12);
-        out.resize(size);
-        f.seekg(off);
-        f.read(out.data(), std::streamsize(size));
-        return true;
-    }
-    return false;
-}
-
-// PlayStation SPU ADPCM: 16-byte blocks, a shift and filter byte, a flag byte, 28 samples of 4 bits.
-// Flag bit 0 ends the sample; bit 1 says the end loops back, bit 2 marks the loop start.
-void decode_vag(const std::string& bd, size_t offset, std::vector<int16_t>& pcm, bool& looped, size_t& loop_start) {
-    static const int F0[5] = {0, 60, 115, 98, 122}, F1[5] = {0, 0, -52, -55, -60};
-    int s1 = 0, s2 = 0;
-    looped = false;
-    loop_start = 0;
-    for (size_t pos = offset; pos + 16 <= bd.size(); pos += 16) {
-        int head = uint8_t(bd[pos]), flags = uint8_t(bd[pos + 1]);
-        int shift = head & 0x0F, filter = std::min((head >> 4) & 0x0F, 4);
-        if (flags & 4) loop_start = pcm.size();
-        for (int i = 0; i < 28; ++i) {
-            int byte = uint8_t(bd[pos + 2 + size_t(i / 2)]);
-            int nibble = (i & 1) ? (byte >> 4) : (byte & 0x0F);
-            int sample = (nibble << 12);
-            if (sample & 0x8000) sample -= 0x10000;
-            sample >>= shift;
-            sample += (s1 * F0[filter] + s2 * F1[filter] + 32) >> 6;
-            sample = std::max(-32768, std::min(32767, sample));
-            pcm.push_back(int16_t(sample));
-            s2 = s1;
-            s1 = sample;
-        }
-        if (flags & 1) {
-            looped = (flags & 2) != 0;
-            break;
-        }
-    }
-}
-
-}  // namespace
-
-bool SeBank::load(const std::string& arc_path, int bank) {
-    std::string hd, bd;
-    std::string stem = "sys_se" + std::to_string(bank);
-    if (!arc_entry(arc_path, stem + ".hd", hd) || !arc_entry(arc_path, stem + ".bd", bd)) return false;
-    if (hd.size() < 0x50 || hd.compare(0, 8, "IECSsreV") != 0) return false;
-    // Chunks: each one is a magic, a size, a highest index and a table of offsets (relative to the
-    // chunk) to its records.
-    auto chunk_offset = [&](const char* magic) -> size_t {
-        size_t pos = 0;
-        while (pos + 16 <= hd.size()) {
-            uint32_t size = le32(hd, pos + 8);
-            if (hd.compare(pos, 8, magic) == 0) return pos;
-            if (size == 0) break;
-            pos += size;
-        }
-        return std::string::npos;
-    };
-    size_t vagi = chunk_offset("IECSigaV"), smpl = chunk_offset("IECSlpmS"), sset = chunk_offset("IECStesS"),
-           prog = chunk_offset("IECSgorP");
-    if (vagi == std::string::npos || smpl == std::string::npos || sset == std::string::npos ||
-        prog == std::string::npos)
-        return false;
-    auto record = [&](size_t chunk, uint32_t index) { return chunk + le32(hd, chunk + 16 + 4 * size_t(index)); };
-    uint32_t vag_count = le32(hd, vagi + 12) + 1, smpl_count = le32(hd, smpl + 12) + 1,
-             sset_count = le32(hd, sset + 12) + 1;
-    vags.clear();
-    for (uint32_t i = 0; i < vag_count; ++i) {
-        size_t r = record(vagi, i);
-        Sample s;
-        s.pcm = std::make_shared<std::vector<int16_t>>();
-        uint32_t offset = le32(hd, r);
-        s.rate = uint8_t(hd[r + 4]) | (uint8_t(hd[r + 5]) << 8);
-        decode_vag(bd, offset, *s.pcm, s.looped, s.loop_start);
-        vags.push_back(std::move(s));
-    }
-    sample_vag.clear();
-    sample_volume.clear();
-    for (uint32_t i = 0; i < smpl_count; ++i) {
-        size_t r = record(smpl, i);
-        sample_vag.push_back(uint8_t(hd[r]) | (uint8_t(hd[r + 1]) << 8));
-        sample_volume.push_back(uint8_t(hd[r + 16]));  // hypothesis: volume of the sample, 0..127
-    }
-    set_sample.clear();
-    for (uint32_t i = 0; i < sset_count; ++i) {
-        size_t r = record(sset, i);
-        set_sample.push_back(uint8_t(hd[r + 4]) | (uint8_t(hd[r + 5]) << 8));
-    }
-    // Program 0: a parameter block (split block address, split count, split size, volume, ...) and the
-    // split blocks. Each split has a sample set number and a range of notes.
-    size_t program = record(prog, 0);
-    int split_count = uint8_t(hd[program + 4]), split_size = uint8_t(hd[program + 5]);
-    size_t split_at = program + le32(hd, program);  // the split blocks' address, relative to the program block
-    splits.clear();
-    for (int i = 0; i < split_count; ++i) {
-        size_t r = split_at + size_t(i) * size_t(split_size);
-        if (r + 6 > hd.size()) break;
-        splits.push_back({uint8_t(hd[r + 2]), uint8_t(hd[r + 4]), uint8_t(hd[r]) | (uint8_t(hd[r + 1]) << 8)});
-    }
-    return true;
-}
 
 bool SeBank::load_vita(const std::string& dir) {
     vags.clear();
@@ -613,71 +319,55 @@ AudioEngine::AudioEngine(const std::string& root) : root_(root) {
     vita_ambience_dir_ = root + "/extracted/sound_wav/ambience";
     vita_music_cpk_ = amg::data_file(root, "sound/MUSIC.CPK");
     vita_ambience_cpk_ = amg::data_file(root, "sound/SOUND.CPK");
-    vita_ = amg::is_vita(root);
-    if (vita_) {
-        // Track number -> index in the converted tracks: the same shape as the PS2's track_table_
-        // below, traced to a different address in the Vita executable (F4-40, vita-cpk-format.md) —
-        // found by following the one reference to the literal path "app0:./sound/MUSIC.CPK" to the
-        // table lookup two calls up the chain. 145 entries, -1 (and garbage past the 145th) for none.
-        std::string exe = amg::vita_exe(root);
-        {
-            constexpr uint32_t TABLE_VA = 0x810a818c;
-            size_t at = amg::vita_va_to_off(exe, TABLE_VA, "music table");
-            for (int i = 0; i < 145 && at + 4 <= exe.size(); ++i, at += 4) {
-                const unsigned char* b = reinterpret_cast<const unsigned char*>(exe.data()) + at;
-                track_table_.push_back(int32_t(uint32_t(b[0]) | (uint32_t(b[1]) << 8) | (uint32_t(b[2]) << 16) |
-                                               (uint32_t(b[3]) << 24)));
-            }
-        }
-        // The voices as VOICE.CPK holds them (one folder per speaker of its inner archives, files by index: HCA
-        // lines and their lip-sync tracks), decoded when a line is first needed. AMG_VITA_VOICE_DIR moves them.
-        const char* voice_dir = std::getenv("AMG_VITA_VOICE_DIR");
-        vita_voice_dir_ = voice_dir && *voice_dir ? std::string(voice_dir) : amg::vita_voice_directory(root);
-        vita_voice_cpk_ = amg::data_file(root, "sound/VOICE.CPK");
-        vita_voice_patch_cpk_ = amg::data_file(root, "sound/VOICE_P.CPK");
-        // VOICE.IDX (speaker, line) -> an index into that speaker's own archive is confirmed
-        // byte-identical between the PS2 and Vita releases (F4-41, vita-cpk-format.md) — same file,
-        // reused as-is. It maps directly onto the Vita per-speaker CPKs' sequential file IDs (checked
-        // against speaker 0: 73 indices, 0 to 72, no gaps, matching Voice00.cpk's 73 files exactly).
-        auto read_voice_index = [](const std::string& path) {
-            std::vector<uint16_t> index;
-            std::ifstream idx(path, std::ios::binary);
-            std::string raw((std::istreambuf_iterator<char>(idx)), std::istreambuf_iterator<char>());
-            for (size_t i = 0; i + 1 < raw.size(); i += 2)
-                index.push_back(uint16_t(uint8_t(raw[i]) | (uint8_t(raw[i + 1]) << 8)));
-            return index;
-        };
-        voice_idx_ = read_voice_index(amg::data_file(root, "sound/VOICE.IDX"));
-        vita_voice_patch_idx_ = read_voice_index(amg::data_file(root, "sound/VOICE_P.IDX"));
-        music_voice_.gain = 1.0;
-        ambience_voice_.gain = 1.0;
-        se_load(0);  // as below: the first effect bank, loaded from the start
-        return;
-    }
-    music_.open(root + "/extracted/SOUND/MUSIC.AFS");
-    sound_.open(root + "/extracted/SOUND/SOUND.AFS");
-    // Track number -> index in MUSIC.AFS: a table of 145 words at 0x28B080 in the executable
-    // (-1 for none). Read from the disc's executable so no game data is stored in the repository.
-    std::ifstream f(root + "/extracted/SLPS_259.87", std::ios::binary);
-    if (f) {
-        f.seekg(0x28B080 - 0x100000 + 0x1000);
-        for (int i = 0; i < 145; ++i) {
-            unsigned char b[4];
-            f.read(reinterpret_cast<char*>(b), 4);
+    // Track number -> index in the converted tracks, found in the Vita executable (F4-40, vita-cpk-format.md) by
+    // following the one reference to the literal path "app0:./sound/MUSIC.CPK" to the table lookup two calls up the
+    // chain. 145 entries, -1 (and garbage past the 145th) for none.
+    std::string exe = amg::vita_exe(root);
+    {
+        constexpr uint32_t TABLE_VA = 0x810a818c;
+        size_t at = amg::vita_va_to_off(exe, TABLE_VA, "music table");
+        for (int i = 0; i < 145 && at + 4 <= exe.size(); ++i, at += 4) {
+            const unsigned char* b = reinterpret_cast<const unsigned char*>(exe.data()) + at;
             track_table_.push_back(int32_t(uint32_t(b[0]) | (uint32_t(b[1]) << 8) | (uint32_t(b[2]) << 16) |
                                            (uint32_t(b[3]) << 24)));
         }
     }
-    music_voice_.gain = 1.0;
-    ambience_voice_.gain = 1.0;
-    voice_afs_.open(root + "/extracted/SOUND/VOICE.AFS");
     {
-        std::ifstream idx(root + "/extracted/SOUND/VOICE.IDX", std::ios::binary);
+        // Line offsets of the voice devices 15 to 37 (d1-audio-stage.md A5): 23 words and the one after them,
+        // which device 37 reads as its upper bound.
+        constexpr uint32_t OFFSETS_VA = 0x810a85f4;
+        size_t at = amg::vita_va_to_off(exe, OFFSETS_VA, "voice line offsets");
+        if (at + 4 * 24 <= exe.size()) {
+            for (int i = 0; i < 24; ++i, at += 4) {
+                const unsigned char* b = reinterpret_cast<const unsigned char*>(exe.data()) + at;
+                voice_offsets_[i] = int32_t(uint32_t(b[0]) | (uint32_t(b[1]) << 8) | (uint32_t(b[2]) << 16) |
+                                            (uint32_t(b[3]) << 24));
+            }
+            voice_offsets_ok_ = true;
+        }
+    }
+    // The voices as VOICE.CPK holds them (one folder per speaker of its inner archives, files by index: HCA
+    // lines and their lip-sync tracks), decoded when a line is first needed. AMG_VITA_VOICE_DIR moves them.
+    const char* voice_dir = std::getenv("AMG_VITA_VOICE_DIR");
+    vita_voice_dir_ = voice_dir && *voice_dir ? std::string(voice_dir) : amg::vita_voice_directory(root);
+    vita_voice_cpk_ = amg::data_file(root, "sound/VOICE.CPK");
+    vita_voice_patch_cpk_ = amg::data_file(root, "sound/VOICE_P.CPK");
+    // VOICE.IDX (speaker, line) -> an index into that speaker's own archive (F4-41, vita-cpk-format.md). It maps
+    // directly onto the per-speaker CPKs' sequential file IDs (checked against speaker 0: 73 indices, 0 to 72, no gaps,
+    // matching Voice00.cpk's 73 files exactly).
+    auto read_voice_index = [](const std::string& path) {
+        std::vector<uint16_t> index;
+        std::ifstream idx(path, std::ios::binary);
         std::string raw((std::istreambuf_iterator<char>(idx)), std::istreambuf_iterator<char>());
         for (size_t i = 0; i + 1 < raw.size(); i += 2)
-            voice_idx_.push_back(uint16_t(uint8_t(raw[i]) | (uint8_t(raw[i + 1]) << 8)));
-    }
-    se_load(0);  // the engine starts with the first effect bank loaded; only the mahjong game loads another
+            index.push_back(uint16_t(uint8_t(raw[i]) | (uint8_t(raw[i + 1]) << 8)));
+        return index;
+    };
+    voice_idx_ = read_voice_index(amg::data_file(root, "sound/VOICE.IDX"));
+    vita_voice_patch_idx_ = read_voice_index(amg::data_file(root, "sound/VOICE_P.IDX"));
+    music_voice_.gain = 1.0;
+    ambience_voice_.gain = 1.0;
+    se_load(0);  // the first effect bank, loaded from the start; only the mahjong game loads another
 }
 
 std::shared_ptr<AdxStream> AudioEngine::vita_track(const std::string& wav_dir, const std::string& cpk,
@@ -707,79 +397,123 @@ std::shared_ptr<AdxStream> AudioEngine::vita_track(const std::string& wav_dir, c
 }
 
 void AudioEngine::music_play(int track) {
-    if (vita_) {
-        // The whole track is read first (15 MB or so), outside the mixer's lock, so the sound thread keeps mixing.
-        std::shared_ptr<AdxStream> s;
-        if (track >= 0 && size_t(track) < track_table_.size() && track_table_[size_t(track)] >= 0) {
-            s = vita_track(vita_music_dir_, vita_music_cpk_, vita_music_entries_, track_table_[size_t(track)]);
-            if (std::getenv("AMG_VOICE_LOG")) std::fprintf(stderr, "music play track=%d file=%d %s\n", track, track_table_[size_t(track)], s ? "ok" : "missing");
+    {
+        const bool known = track >= 0 && size_t(track) < track_table_.size() && track_table_[size_t(track)] >= 0;
+        // Reads the whole track first (15 MB or so) and decodes it, outside the mixer's lock so the sound thread keeps mixing.
+        auto load = [this, track, known]() -> std::shared_ptr<AdxStream> {
+            if (!known) return nullptr;
+            const auto started = std::chrono::steady_clock::now();
+            auto s = vita_track(vita_music_dir_, vita_music_cpk_, vita_music_entries_, track_table_[size_t(track)]);
+            if (std::getenv("AMG_VOICE_LOG"))
+                std::fprintf(stderr, "music play track=%d file=%d %s (%lld ms)\n", track, track_table_[size_t(track)],
+                             s ? "ok" : "missing",
+                             (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count());
+            return s;
+        };
+        auto start = [this](const std::shared_ptr<AdxStream>& s) {
+            music_voice_.stream = s;
+            if (!s) return;
+            // The title's music is asked for at the first logo and paused at once (the script resumes it at the title: pause(1)
+            // at tick 75, pause(0) at tick 780); the track loads meanwhile, so the pause arrives before it starts and must stay.
+            music_voice_.paused = music_pause_asked_;
+            if (std::getenv("AMG_VOICE_LOG")) std::fprintf(stderr, "music ready, paused=%d\n", int(music_voice_.paused));
+            music_voice_.primed = false;
+            music_voice_.phase = 0.0;
+        };
+        const unsigned request = ++music_request_;
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            music_pause_asked_ = false;  // a new play starts running; a pause asked after it is kept for the start
         }
-        std::lock_guard<std::mutex> lk(mutex_);
-        music_voice_.stream = s;
-        if (!s) return;
-        music_voice_.paused = false;
-        music_voice_.primed = false;
-        music_voice_.phase = 0.0;
+        if (!async_tracks_) {
+            auto s = load();
+            std::lock_guard<std::mutex> lk(mutex_);
+            start(s);
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            music_voice_.stream.reset();  // the old track stops now; the new one starts when it is ready
+        }
+        if (!known) {
+            music_loading_ = false;
+            return;
+        }
+        music_loading_ = true;
+        std::thread([this, load, start, request] {
+            auto s = load();
+            std::lock_guard<std::mutex> lk(mutex_);
+            if (request != music_request_) return;  // asked again, or stopped, meanwhile
+            start(s);
+            music_loading_ = false;
+        }).detach();
         return;
     }
-    std::lock_guard<std::mutex> lk(mutex_);
-    music_voice_.stream.reset();
-    if (track < 0 || size_t(track) >= track_table_.size() || track_table_[size_t(track)] < 0) return;
-    const auto& entry = music_.files[size_t(track_table_[size_t(track)])];
-    auto s = std::make_shared<AdxStream>();
-    if (!s->load(music_.path, entry.first, entry.second, key_)) return;
-    music_voice_.stream = s;
-    music_voice_.paused = false;
-    music_voice_.primed = false;
-    music_voice_.phase = 0.0;
 }
 
 void AudioEngine::music_stop() {
     std::lock_guard<std::mutex> lk(mutex_);
+    ++music_request_;
+    music_loading_ = false;
     music_voice_.stream.reset();
 }
 void AudioEngine::music_pause(bool paused) {
     std::lock_guard<std::mutex> lk(mutex_);
+    music_pause_asked_ = paused;
     music_voice_.paused = paused;
 }
 void AudioEngine::music_volume(int volume) {
     std::lock_guard<std::mutex> lk(mutex_);
     // FIDELITY: read 0x810057C6 (the Vita's Music.setVolumePrim): volume * 0.008 to the player, no clamp, so 100 is 0.8;
     // voices and the ambience take volume * 0.01 (0x8107DB28, 0x81006F8A), effects volume * 0.006 (0x81006EBC).
-    music_voice_.gain = vita_ ? std::max(0, volume) * 0.008 : std::max(0, std::min(100, volume)) / 100.0;
+    music_voice_.gain = std::max(0, volume) * 0.008;
 }
 bool AudioEngine::music_busy() {
     std::lock_guard<std::mutex> lk(mutex_);
-    return music_voice_.stream && !music_voice_.stream->ended;
+    return music_loading_ || (music_voice_.stream && !music_voice_.stream->ended);
 }
 
 void AudioEngine::ambience_play(int number) {
-    if (vita_) {
-        std::shared_ptr<AdxStream> s;  // read outside the mixer's lock, as music_play
-        if (number >= 1) {
-            s = vita_track(vita_ambience_dir_, vita_ambience_cpk_, vita_ambience_entries_, number - 1);  // ENV0001 is entry 0 (hypothesis)
+    {
+        auto load = [this, number]() -> std::shared_ptr<AdxStream> {
+            if (number < 1) return nullptr;
+            return vita_track(vita_ambience_dir_, vita_ambience_cpk_, vita_ambience_entries_, number - 1);  // ENV0001 is entry 0 (hypothesis)
+        };
+        auto start = [this](const std::shared_ptr<AdxStream>& s) {
+            ambience_voice_.stream = s;
+            if (!s) return;
+            ambience_voice_.paused = false;
+            ambience_voice_.primed = false;
+            ambience_voice_.phase = 0.0;
+        };
+        const unsigned request = ++ambience_request_;
+        if (!async_tracks_) {
+            auto s = load();
+            std::lock_guard<std::mutex> lk(mutex_);
+            start(s);
+            return;
         }
-        std::lock_guard<std::mutex> lk(mutex_);
-        ambience_voice_.stream = s;
-        if (!s) return;
-        ambience_voice_.paused = false;
-        ambience_voice_.primed = false;
-        ambience_voice_.phase = 0.0;
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            ambience_voice_.stream.reset();
+        }
+        if (number < 1) return;
+        ambience_loading_ = true;
+        std::thread([this, load, start, request] {
+            auto s = load();
+            std::lock_guard<std::mutex> lk(mutex_);
+            if (request != ambience_request_) return;
+            start(s);
+            ambience_loading_ = false;
+        }).detach();
         return;
     }
-    std::lock_guard<std::mutex> lk(mutex_);
-    ambience_voice_.stream.reset();
-    if (number < 1 || size_t(number - 1) >= sound_.files.size()) return;  // ENV0001 is entry 0 (hypothesis)
-    const auto& entry = sound_.files[size_t(number - 1)];
-    auto s = std::make_shared<AdxStream>();
-    if (!s->load(sound_.path, entry.first, entry.second, key_)) return;
-    ambience_voice_.stream = s;
-    ambience_voice_.paused = false;
-    ambience_voice_.primed = false;
-    ambience_voice_.phase = 0.0;
 }
+
 void AudioEngine::ambience_stop() {
     std::lock_guard<std::mutex> lk(mutex_);
+    ++ambience_request_;
+    ambience_loading_ = false;
     ambience_voice_.stream.reset();
 }
 void AudioEngine::ambience_pause(bool paused) {
@@ -791,15 +525,38 @@ void AudioEngine::ambience_volume(int volume) {
     ambience_voice_.gain = std::max(0, std::min(100, volume)) / 100.0;
 }
 
+bool AudioEngine::load_se_bank(int bank, SeBank& out) {
+    bool ok = out.load_vita(root_ + "/extracted/sound_wav/se" + std::to_string(bank)) ||
+              out.load_acb(amg::data_file(root_, "sound/SYSSE" + std::to_string(bank) + ".ACB"));
+    if (std::getenv("AMG_VOICE_LOG")) std::fprintf(stderr, "se load bank=%d %s (%zu samples)\n", bank, ok ? "ok" : "failed", out.vags.size());
+    return ok;
+}
+
+// The bank in use goes to the shelf and the asked one comes off it (or is read, if warm_voices has not got to it): reading
+// the second bank took 35 to 45 ms, in the middle of a frame, the first time the mahjong game was opened.
 void AudioEngine::se_load(int bank) {
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        if (bank == bank_no_) {  // the same bank again: nothing to read
+            effects_.clear();
+            return;
+        }
+        auto shelved = shelf_.find(bank);
+        if (shelved != shelf_.end()) {
+            if (bank_no_ >= 0) shelf_[bank_no_] = std::move(bank_);
+            bank_ = std::move(shelf_[bank]);
+            shelf_.erase(bank);
+            bank_no_ = bank;
+            effects_.clear();
+            return;
+        }
+    }
     SeBank loaded;
-    bool ok = vita_ ? (loaded.load_vita(root_ + "/extracted/sound_wav/se" + std::to_string(bank)) ||
-                       loaded.load_acb(amg::data_file(root_, "sound/SYSSE" + std::to_string(bank) + ".ACB")))
-                    : loaded.load(root_ + "/extracted/SOUND/MUSIC.ARC", bank);
-    if (std::getenv("AMG_VOICE_LOG")) std::fprintf(stderr, "se load bank=%d %s (%zu samples)\n", bank, ok ? "ok" : "failed", loaded.vags.size());
-    if (!ok) return;
+    if (!load_se_bank(bank, loaded)) return;
     std::lock_guard<std::mutex> lk(mutex_);
+    if (bank_no_ >= 0 && bank_no_ != bank) shelf_[bank_no_] = std::move(bank_);
     bank_ = std::move(loaded);
+    bank_no_ = bank;
     effects_.clear();
 }
 
@@ -813,7 +570,7 @@ void AudioEngine::se_play(int note, int volume) {
     EffectVoice v;
     v.pcm = s->pcm;
     v.step = double(s->rate > 0 ? s->rate : 44100) / double(AUDIO_RATE);
-    v.gain = (vita_ ? std::max(0, volume) * 0.006 : std::max(0, std::min(100, volume)) / 100.0) * (sample_volume / 127.0);
+    v.gain = std::max(0, volume) * 0.006 * (sample_volume / 127.0);
     v.looped = s->looped;
     v.loop_start = s->loop_start;
     if (effects_.size() >= 24) effects_.erase(effects_.begin());
@@ -826,59 +583,41 @@ void AudioEngine::se_stop() {
 }
 
 // The decoded line `number` of `speaker`: VOICE.IDX gives the file inside the speaker's archive
-// (docs/technical/audio.md). Decoded lines are kept in a small cache.
-// Reads file `kind` (0 .slp, 1 .ahx) of a voice line through VOICE.IDX. voice_mutex_ must be held.
-bool AudioEngine::voice_file(int speaker, int number, int kind, std::string& out) {
-    if (speaker < 0 || speaker >= 16 || number < 0 || number >= 10000) return false;
-    size_t group_at = size_t(speaker) * 100 + size_t(number / 100);
-    if (group_at >= voice_idx_.size() || voice_idx_[group_at] == 0xFFFF) return false;
-    size_t file_at = 1600 + size_t(voice_idx_[group_at]) * 200 + size_t(number % 100) * 2 + size_t(kind);
-    if (file_at >= voice_idx_.size() || voice_idx_[file_at] == 0xFFFF) return false;
-    if (size_t(speaker) >= voice_afs_.files.size()) return false;
-    if (voice_tables_.empty()) voice_tables_.resize(voice_afs_.files.size());
-    auto& table = voice_tables_[size_t(speaker)];
-    std::ifstream f(voice_afs_.path, std::ios::binary);
-    uint32_t base = voice_afs_.files[size_t(speaker)].first;
-    if (table.empty()) {
-        char head[8];
-        f.seekg(base);
-        f.read(head, 8);
-        uint32_t n = le32(std::string(head, 8), 4);
-        std::string raw(8 * size_t(n), '\0');
-        f.read(raw.data(), std::streamsize(raw.size()));
-        for (uint32_t i = 0; i < n; ++i) table.emplace_back(le32(raw, 8 * i), le32(raw, 8 * i + 4));
-    }
-    size_t index = voice_idx_[file_at];
-    if (index >= table.size()) return false;
-    out.assign(table[index].second, '\0');
-    f.seekg(std::streamoff(base) + table[index].first);
-    f.read(out.data(), std::streamsize(out.size()));
-    return bool(f);
-}
-
+// (docs/technical/vita-cpk-format.md). Decoded lines are kept in a small cache.
 std::shared_ptr<std::vector<int16_t>> AudioEngine::voice_pcm(int speaker, int number) {
     if (speaker < 0 || speaker >= 16 || number < 0 || number >= 10000) return nullptr;
     int key = (speaker << 16) | number;
-    std::lock_guard<std::mutex> lk(voice_mutex_);
-    for (auto& [k, pcm] : voice_cache_)
-        if (k == key) return pcm;
-    auto pcm = std::make_shared<std::vector<int16_t>>();
-    if (vita_) {
-        bool patched = false;
-        int index = vita_voice_index(speaker, number, 1, &patched);
-        if (index < 0) return nullptr;
-        std::string file;
-        if (!vita_voice_file(speaker, index, file, patched)) return nullptr;
-        int rate = 0, channels = 0;
-        if (!decode_hca(file, *pcm, rate, channels) || channels != 1) return nullptr;
-    } else {
-        std::string file;
-        if (!voice_file(speaker, number, 1, file)) return nullptr;
-        int rate = 0;
-        if (!decode_ahx(file, *pcm, rate)) return nullptr;
+    std::promise<std::shared_ptr<std::vector<int16_t>>> done;
+    std::shared_future<std::shared_ptr<std::vector<int16_t>>> waiting;
+    std::string file;
+    {
+        std::unique_lock<std::mutex> lk(voice_mutex_);
+        for (auto& [k, pcm] : voice_cache_)
+            if (k == key) return pcm;
+        auto running = voice_inflight_.find(key);
+        if (running != voice_inflight_.end()) {  // another thread is decoding this line: wait for it, not for the lock
+            waiting = running->second;
+        } else {
+            bool patched = false;
+            int index = vita_voice_index(speaker, number, 1, &patched);
+            if (index < 0 || !vita_voice_file(speaker, index, file, patched)) return nullptr;
+            voice_inflight_[key] = done.get_future().share();
+        }
     }
-    if (voice_cache_.size() >= 32) voice_cache_.erase(voice_cache_.begin());
-    voice_cache_.emplace_back(key, pcm);
+    if (waiting.valid()) return waiting.get();
+    // The decoding (tens of milliseconds) is outside the lock: a line asked for meanwhile does not wait for this one.
+    auto pcm = std::make_shared<std::vector<int16_t>>();
+    int rate = 0, channels = 0;
+    if (!decode_hca(file, *pcm, rate, channels) || channels != 1) pcm = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(voice_mutex_);
+        if (pcm) {
+            if (voice_cache_.size() >= 32) voice_cache_.erase(voice_cache_.begin());
+            voice_cache_.emplace_back(key, pcm);
+        }
+        voice_inflight_.erase(key);
+    }
+    done.set_value(pcm);
     return pcm;
 }
 
@@ -919,7 +658,7 @@ bool AudioEngine::vita_voice_file(int speaker, int index, std::string& out, bool
 std::shared_ptr<std::string> AudioEngine::voice_slp(int speaker, int number) {
     std::lock_guard<std::mutex> lk(voice_mutex_);
     auto slp = std::make_shared<std::string>();
-    if (vita_) {
+    {
         // Kept like the lines (voice_prepare reads both ahead); voice_mutex_ is held.
         static std::vector<std::pair<int, std::shared_ptr<std::string>>> cache;
         int key = (speaker << 16) | number;
@@ -933,8 +672,6 @@ std::shared_ptr<std::string> AudioEngine::voice_slp(int speaker, int number) {
         cache.emplace_back(key, slp);
         return slp;
     }
-    if (!voice_file(speaker, number, 0, *slp)) return nullptr;
-    return slp;
 }
 
 // VOICE.IDX, (speaker, line, kind) -> index into the speaker's own archive; kind 0 is the line's
@@ -960,9 +697,33 @@ int AudioEngine::vita_voice_index(int speaker, int number, int kind, bool* patch
     return lookup(voice_idx_);
 }
 
-void AudioEngine::voice_prepare(int speaker, int number) {
-    if (std::getenv("AMG_VOICE_LOG")) std::fprintf(stderr, "voice setup speaker=%d number=%d\n", speaker, number);
-    if (vita_) {
+// A device's line on the Vita (0x810071CC and the Voice primitives at 0x810072DC to 0x8100742C): the device is clamped
+// to 37; devices below 15 are their own speaker, devices 15 to 37 read speaker 15's archive at n + T[d-15], and a
+// line at or past T[d-14] becomes T[d-15]. Device 26 (T[11] = 8800 > T[12]) always lands on 8800, a line speaker 15
+// does not have, so it is silent, as on the Vita. Device 37 would read its bound from the word after the table
+// (pending, d1-leftovers.md 4.3); it is kept silent.
+bool AudioEngine::voice_source(int device, int number, int& speaker, int& line) const {
+    if (device < 0 || number < 0) return false;  // a negative line would land on the previous device's lines (review 2026-10-30)
+    const int d = std::min(device, VOICE_DEVICES - 1);
+    if (d < 15) {
+        speaker = d;
+        line = number;
+        return true;
+    }
+    if (!voice_offsets_ok_ || d == 37) return false;
+    int64_t n = int64_t(number) + voice_offsets_[d - 15];
+    if (n >= voice_offsets_[d - 14]) n = voice_offsets_[d - 15];
+    if (n < 0 || n >= 10000) return false;
+    speaker = 15;
+    line = int(n);
+    return true;
+}
+
+void AudioEngine::voice_prepare(int device, int number) {
+    if (std::getenv("AMG_VOICE_LOG")) std::fprintf(stderr, "voice setup device=%d number=%d\n", device, number);
+    int speaker = 0;
+    if (!voice_source(device, number, speaker, number)) return;
+    {
         // Read on a helper thread so the game does not wait on the disk (the Vita's voices are plain WAV files,
         // possibly on a slow disk, AMG_VITA_VOICE_DIR): the line and its lip-sync track land in the cache, and
         // a play that comes first just waits for the rest of the read. The engine lives as long as the process.
@@ -970,36 +731,59 @@ void AudioEngine::voice_prepare(int speaker, int number) {
             voice_pcm(speaker, number);
             voice_slp(speaker, number);
         }).detach();
-        return;
     }
-    voice_pcm(speaker, number);
 }
 
-void AudioEngine::voice_play(int speaker, int channel, int number, int volume) {
+void AudioEngine::warm_voices() {
+    std::thread([this] {
+        for (int bank = 0; bank < 4; ++bank) {  // the other effect banks, ready for se_load
+            {
+                std::lock_guard<std::mutex> lk(mutex_);
+                if (bank == bank_no_ || shelf_.count(bank)) continue;
+            }
+            SeBank loaded;
+            if (!load_se_bank(bank, loaded)) continue;
+            std::lock_guard<std::mutex> lk(mutex_);
+            if (bank != bank_no_ && !shelf_.count(bank)) shelf_[bank] = std::move(loaded);
+        }
+        for (int speaker = 0; speaker < 16; ++speaker) {
+            std::lock_guard<std::mutex> lk(voice_mutex_);  // one speaker at a time: a line asked for meanwhile waits for at most one
+            std::string unused;
+            vita_voice_file(speaker, 0, unused, false);
+            if (!vita_voice_patch_idx_.empty()) vita_voice_file(speaker, 0, unused, true);
+        }
+    }).detach();
+}
+
+void AudioEngine::voice_play(int device, int channel, int number, int volume) {
     static const bool log = std::getenv("AMG_VOICE_LOG") != nullptr;
-    if (log) std::fprintf(stderr, "voice play speaker=%d channel=%d number=%d volume=%d\n", speaker, channel, number, volume);
-    auto pcm = voice_pcm(speaker, number);
-    if (log) std::fprintf(stderr, "  -> %zu samples\n", pcm ? pcm->size() : size_t(0));
-    std::shared_ptr<std::string> slp = (channel & 1) == 0 ? voice_slp(speaker, number) : nullptr;
+    if (log) std::fprintf(stderr, "voice play device=%d channel=%d number=%d volume=%d\n", device, channel, number, volume);
+    if (device < 0) return;
+    int speaker = -1, line = -1;
+    std::shared_ptr<std::vector<int16_t>> pcm;
+    std::shared_ptr<std::string> slp;
+    if (voice_source(device, number, speaker, line)) {
+        pcm = voice_pcm(speaker, line);
+        if ((channel & 1) == 0) slp = voice_slp(speaker, line);
+    }
+    if (log) std::fprintf(stderr, "  -> speaker %d line %d, %zu samples\n", speaker, line, pcm ? pcm->size() : size_t(0));
     std::lock_guard<std::mutex> lk(mutex_);
-    if (speaker < 0 || speaker > 16) return;
-    VoiceChannel& c = voices_[channel & 1][speaker];
+    VoiceChannel& c = voices_[channel & 1][std::min(device, VOICE_DEVICES - 1)];
     c.active = pcm && !pcm->empty();
     c.paused = false;
     if (!c.active) return;
     c.v = EffectVoice();
     c.v.pcm = pcm;
     c.slp = slp;
-    // AHX is fixed at 24000 Hz; the Vita's HCA voices decode at 48000 Hz (confirmed on real files,
-    // docs/technical/vita-cpk-format.md) — not stored per voice, just the two known platform rates.
-    c.v.step = (vita_ ? 48000.0 : 24000.0) / double(AUDIO_RATE);
+    // The HCA voices decode at 48000 Hz (confirmed on real files, docs/technical/vita-cpk-format.md).
+    c.v.step = 48000.0 / double(AUDIO_RATE);
     c.v.gain = std::max(0, std::min(100, volume)) / 100.0;
 }
 
 void AudioEngine::voice_stop(int speaker, int channel) {
     if (std::getenv("AMG_VOICE_LOG")) std::fprintf(stderr, "voice stop speaker=%d channel=%d\n", speaker, channel);
     std::lock_guard<std::mutex> lk(mutex_);
-    if (speaker >= 0 && speaker <= 16) voices_[channel & 1][speaker].active = false;
+    if (speaker >= 0) voices_[channel & 1][std::min(speaker, VOICE_DEVICES - 1)].active = false;
 }
 
 void AudioEngine::voice_stop_all(int channel) {
@@ -1010,31 +794,34 @@ void AudioEngine::voice_stop_all(int channel) {
 
 void AudioEngine::voice_volume(int speaker, int channel, int volume) {
     std::lock_guard<std::mutex> lk(mutex_);
-    if (speaker >= 0 && speaker <= 16)
-        voices_[channel & 1][speaker].v.gain = std::max(0, std::min(100, volume)) / 100.0;
+    if (speaker >= 0)
+        voices_[channel & 1][std::min(speaker, VOICE_DEVICES - 1)].v.gain = std::max(0, std::min(100, volume)) / 100.0;
 }
 
 void AudioEngine::voice_pause(int speaker, bool paused) {
     if (std::getenv("AMG_VOICE_LOG")) std::fprintf(stderr, "voice pause speaker=%d paused=%d\n", speaker, int(paused));
     std::lock_guard<std::mutex> lk(mutex_);
-    if (speaker >= 0 && speaker <= 16) voices_[0][speaker].paused = paused;
+    if (speaker >= 0) voices_[0][std::min(speaker, VOICE_DEVICES - 1)].paused = paused;
 }
 
 int AudioEngine::mouth_level(int speaker) {
     std::lock_guard<std::mutex> lk(mutex_);
-    if (speaker < 0 || speaker > 16) return -1;
-    const VoiceChannel& c = voices_[0][speaker];
+    if (speaker < 0) return -1;
+    const VoiceChannel& c = voices_[0][std::min(speaker, VOICE_DEVICES - 1)];
     if (!c.active || !c.slp) return -1;
-    // One .slp byte per 1/60 s: 400 samples of the PS2's 24 kHz AHX, 800 of the Vita's 48 kHz HCA (the
-    // tracks themselves are byte-identical between the two releases).
-    size_t at = size_t(c.v.position) / (vita_ ? 800 : 400);
+    // One .slp byte per 1/60 s: 800 samples of the 48 kHz HCA.
+    size_t at = size_t(c.v.position) / 800;
     if (at >= c.slp->size()) return -1;
     return uint8_t((*c.slp)[at]) & 3;
 }
 
-int AudioEngine::voice_length(int speaker, int number) {
-    auto pcm = voice_pcm(speaker, number);
-    return pcm ? int(pcm->size() * 60 / (vita_ ? 48000 : 24000)) : 0;  // hypothesis: the scripts count video frames
+// The Vita answers max(slp bytes - 18, 12) (0x810073D4; binder method 0x24 is the lip-sync track's byte size, one
+// byte per 1/60 s, which is the line's length in frames: d1-leftovers.md 4.2), and 0 without a line.
+int AudioEngine::voice_length(int device, int number) {
+    int speaker = 0, line = 0;
+    if (!voice_source(device, number, speaker, line)) return 0;
+    auto slp = voice_slp(speaker, line);
+    return slp ? std::max(int(slp->size()) - 18, 12) : 0;
 }
 
 void AudioEngine::mix(Voice& v, std::vector<float>& acc, size_t frames) {
@@ -1141,19 +928,23 @@ void install_audio(VM& vm, AudioEngine* engine) {
     };
     // Music: setup(track) prepares, playPrim(track) starts, stopPrim, pause(flag), setVolumePrim(0..100), isBusy.
     prim("Music", 0, [](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) { return st[b]; });
-    prim("Music", 1, [engine, arg_int](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
+    prim("Music", 1, [engine, arg_int](VM& vm, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
+        if (std::getenv("AMG_VOICE_LOG")) std::fprintf(stderr, "music asked: track %lld at tick %lld\n", (long long)arg_int(st, b, 0), (long long)vm.tick);
         engine->music_play(arg_int(st, b, 0));
         return st[b];
     });
-    prim("Music", 2, [engine](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
+    prim("Music", 2, [engine](VM& vm, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
+        if (std::getenv("AMG_VOICE_LOG")) std::fprintf(stderr, "music asked: stop at tick %lld\n", (long long)vm.tick);
         engine->music_stop();
         return st[b];
     });
-    prim("Music", 3, [engine, truthy](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
+    prim("Music", 3, [engine, truthy](VM& vm, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
+        if (std::getenv("AMG_VOICE_LOG")) std::fprintf(stderr, "music asked: pause %d at tick %lld\n", int(truthy(st.at(b + 1))), (long long)vm.tick);
         engine->music_pause(truthy(st.at(b + 1)));
         return st[b];
     });
-    prim("Music", 4, [engine, arg_int](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
+    prim("Music", 4, [engine, arg_int](VM& vm, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
+        if (std::getenv("AMG_VOICE_LOG")) std::fprintf(stderr, "music asked: volume %lld at tick %lld\n", (long long)arg_int(st, b, 0), (long long)vm.tick);
         engine->music_volume(arg_int(st, b, 0));
         return st[b];
     });

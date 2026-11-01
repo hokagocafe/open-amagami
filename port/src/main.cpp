@@ -10,10 +10,27 @@
 #include <csignal>
 #include <iostream>
 
-#include "ahx.hpp"
 #include "audio.hpp"
 #include "gfx.hpp"
+#include "menu_pointer.hpp"
+#include "mouse_menus.hpp"
+#include "cursor_art.hpp"
+#include "sampler.hpp"
 #include "vm.hpp"
+#ifdef AMG_PERSONAL
+#include <memory>
+#include "personal/text_extract.hpp"
+#endif
+
+#ifdef _WIN32
+#include <windows.h>
+// AMG_CRASH_TRACE=1: an access violation prints where it happened (offset in the program, to look up in its .map file).
+static LONG WINAPI crash_trace(EXCEPTION_POINTERS* e) {
+    std::fprintf(stderr, "CRASH code=%08lx at offset 0x%llx\n", e->ExceptionRecord->ExceptionCode,
+                 (unsigned long long)((uintptr_t)e->ExceptionRecord->ExceptionAddress - (uintptr_t)GetModuleHandleW(nullptr)));
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
 
 using namespace amg;
 
@@ -44,6 +61,9 @@ static void write_coverage(amg::VM& vm, const std::string& name) {
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    if (std::getenv("AMG_CRASH_TRACE")) SetUnhandledExceptionFilter(crash_trace);
+#endif
     std::string root = ".", log, save_dir;
     bool smooth = false;
     bool fork_scenes = false;  // --fork
@@ -62,6 +82,8 @@ int main(int argc, char** argv) {
     std::string scene;  // --scene NAME: run one event scene headless (see docs/technical/port.md)
     std::vector<std::tuple<int64_t, int64_t, int>> presses;
     std::vector<std::pair<int64_t, std::string>> shots;
+    struct MouseAt { int64_t tick; double x, y; std::string flags; };
+    std::vector<MouseAt> mouse;  // --mouse TICK:X:Y[:FLAGS]
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&]() -> std::string {
@@ -79,110 +101,6 @@ int main(int argc, char** argv) {
         else if (a == "--chain") chain = true;  // follow the events the scene chains to
         else if (a == "--choice") choice = std::stoi(next());
         else if (a == "--log") log = next();
-        else if (a == "--adx") {  // development aid: decode one file of an AFS at its own rate: ARCHIVE:INDEX:OUT.wav
-            std::string spec = next();
-            size_t c1 = spec.find(':'), c2 = spec.rfind(':');
-            Afs afs;
-            AdxStream s;
-            size_t index = c1 == std::string::npos || c1 == c2 ? 0 : size_t(std::stoul(spec.substr(c1 + 1, c2 - c1 - 1)));
-            if (c1 == std::string::npos || c1 == c2 || !afs.open(spec.substr(0, c1)) || index >= afs.files.size() ||
-                !s.load(afs.path, afs.files[index].first, afs.files[index].second, "mituba")) {
-                std::fprintf(stderr, "cannot decode %s\n", spec.c_str());
-                return 1;
-            }
-            std::vector<int16_t> pcm;
-            int16_t l, r;
-            while (s.next(l, r) && pcm.size() < size_t(s.samples) * 2) {
-                pcm.push_back(l);
-                pcm.push_back(r);
-                if (s.looped && s.position >= s.loop_end) break;
-            }
-            std::ofstream w(spec.substr(c2 + 1), std::ios::binary);
-            auto u32 = [&](uint32_t x) { for (int i = 0; i < 4; ++i) w.put(char((x >> (8 * i)) & 0xFF)); };
-            auto u16 = [&](uint16_t x) { w.put(char(x & 0xFF)); w.put(char(x >> 8)); };
-            uint32_t nbytes = uint32_t(pcm.size() * 2);
-            w.write("RIFF", 4); u32(36 + nbytes); w.write("WAVEfmt ", 8); u32(16); u16(1); u16(2); u32(uint32_t(s.rate));
-            u32(uint32_t(s.rate) * 4); u16(4); u16(16); w.write("data", 4); u32(nbytes);
-            w.write(reinterpret_cast<const char*>(pcm.data()), std::streamsize(nbytes));
-            return 0;
-        }
-        else if (a == "--se") {  // development aid: list a sound-effect bank and write one note: BANK[:NOTE:OUT.wav]
-            std::string spec = next();
-            int bank = std::stoi(spec);
-            SeBank b;
-            if (!b.load(root + "/extracted/SOUND/MUSIC.ARC", bank)) {
-                std::fprintf(stderr, "cannot load bank %d\n", bank);
-                return 1;
-            }
-            std::printf("bank %d: %zu samples, %zu splits\n", bank, b.vags.size(), b.splits.size());
-            for (size_t i = 0; i < b.vags.size(); ++i)
-                std::printf("  vag %2zu: %6zu samples at %d Hz%s\n", i, b.vags[i].pcm->size(), b.vags[i].rate,
-                            b.vags[i].looped ? " (loops)" : "");
-            size_t c1 = spec.find(':'), c2 = spec.rfind(':');
-            if (c1 != std::string::npos && c2 != c1) {
-                int note = std::stoi(spec.substr(c1 + 1, c2 - c1 - 1)), volume = 0;
-                const SeBank::Sample* sample = b.lookup(note, volume);
-                if (!sample) {
-                    std::fprintf(stderr, "note %d plays nothing\n", note);
-                    return 1;
-                }
-                std::ofstream w(spec.substr(c2 + 1), std::ios::binary);
-                auto u32 = [&](uint32_t x) { for (int i = 0; i < 4; ++i) w.put(char((x >> (8 * i)) & 0xFF)); };
-                auto u16 = [&](uint16_t x) { w.put(char(x & 0xFF)); w.put(char(x >> 8)); };
-                uint32_t bytes = uint32_t(sample->pcm->size() * 2);
-                w.write("RIFF", 4); u32(36 + bytes); w.write("WAVEfmt ", 8); u32(16); u16(1); u16(1);
-                u32(uint32_t(sample->rate)); u32(uint32_t(sample->rate) * 2); u16(2); u16(16);
-                w.write("data", 4); u32(bytes);
-                w.write(reinterpret_cast<const char*>(sample->pcm->data()), std::streamsize(bytes));
-                std::printf("note %d: volume %d, %zu samples\n", note, volume, sample->pcm->size());
-            }
-            return 0;
-        }
-        else if (a == "--ahx") {  // development aid: decode a voice file: SPEAKER:LINE_FILE_INDEX:OUT.wav
-            std::string spec = next();
-            size_t c1 = spec.find(':'), c2 = spec.rfind(':');
-            if (c1 == std::string::npos || c1 == c2) {
-                std::fprintf(stderr, "--ahx wants SPEAKER:INDEX:OUT.wav\n");
-                return 2;
-            }
-            size_t speaker = size_t(std::stoul(spec.substr(0, c1))), index = size_t(std::stoul(spec.substr(c1 + 1, c2 - c1 - 1)));
-            Afs outer;
-            if (!outer.open(root + "/extracted/SOUND/VOICE.AFS") || speaker >= outer.files.size()) {
-                std::fprintf(stderr, "cannot open VOICE.AFS\n");
-                return 1;
-            }
-            std::ifstream f(outer.path, std::ios::binary);
-            std::string inner;
-            f.seekg(outer.files[speaker].first);
-            inner.resize(outer.files[speaker].second);
-            f.read(inner.data(), std::streamsize(inner.size()));
-            auto le = [&](size_t at) {
-                return uint32_t(uint8_t(inner[at])) | (uint32_t(uint8_t(inner[at + 1])) << 8) |
-                       (uint32_t(uint8_t(inner[at + 2])) << 16) | (uint32_t(uint8_t(inner[at + 3])) << 24);
-            };
-            uint32_t count = le(4);
-            if (index >= count) {
-                std::fprintf(stderr, "speaker has %u files\n", count);
-                return 1;
-            }
-            std::string file = inner.substr(le(8 + 8 * index), le(12 + 8 * index));
-            std::vector<int16_t> pcm;
-            int rate = 0;
-            if (!decode_ahx(file, pcm, rate)) {
-                std::fprintf(stderr, "not a decodable AHX file (%zu bytes)\n", file.size());
-                return 1;
-            }
-            std::ofstream w(spec.substr(c2 + 1), std::ios::binary);
-            auto u32 = [&](uint32_t x) { for (int i = 0; i < 4; ++i) w.put(char((x >> (8 * i)) & 0xFF)); };
-            auto u16 = [&](uint16_t x) { w.put(char(x & 0xFF)); w.put(char(x >> 8)); };
-            uint32_t nbytes = uint32_t(pcm.size() * 2);
-            w.write("RIFF", 4); u32(36 + nbytes); w.write("WAVEfmt ", 8); u32(16); u16(1); u16(1);
-            u32(uint32_t(rate)); u32(uint32_t(rate) * 2); u16(2); u16(16);
-            w.write("data", 4); u32(nbytes);
-            w.write(reinterpret_cast<const char*>(pcm.data()), std::streamsize(nbytes));
-            std::printf("%zu samples at %d Hz\n", pcm.size(), rate);
-            return 0;
-        }
         else if (a == "--audio") audio_on = true;  // run the sound engine as the window does, without writing it out
         else if (a == "--wav") wav = next();  // render the mixed sound of the run to a WAV file (turns graphics on)
         else if (a == "--ticks") tick_limit = std::stoll(next());  // stop at this frame (replaying a recorded session)
@@ -197,6 +115,27 @@ int main(int argc, char** argv) {
                 return 2;
             }
             shots.emplace_back(std::stoll(spec.substr(0, colon)), spec.substr(colon + 1));
+        }
+        else if (a == "--mouse") {
+            // The mouse from this tick on, at X,Y in script units from the middle of the picture; FLAGS: d = left button
+            // held (its first tick is the click), r = right click (one tick), u / n = wheel up / down (one notch).
+            std::string spec = next();
+            MouseAt m{0, 0, 0, ""};
+            size_t p1 = spec.find(':'), p2 = spec.find(':', p1 + 1), p3 = spec.find(':', p2 + 1);
+            if (p1 == std::string::npos || p2 == std::string::npos) {
+                std::fprintf(stderr, "--mouse wants TICK:X:Y[:FLAGS]\n");
+                return 2;
+            }
+            try {
+                m.tick = std::stoll(spec.substr(0, p1));
+                m.x = std::stod(spec.substr(p1 + 1, p2 - p1 - 1));
+                m.y = std::stod(spec.substr(p2 + 1, p3 == std::string::npos ? p3 : p3 - p2 - 1));
+            } catch (const std::exception&) {
+                std::fprintf(stderr, "--mouse wants TICK:X:Y[:FLAGS] with numbers\n");
+                return 2;
+            }
+            if (p3 != std::string::npos) m.flags = spec.substr(p3 + 1);
+            mouse.push_back(m);
         }
         else if (a == "--press") {
             std::string spec = next();
@@ -313,7 +252,7 @@ int main(int argc, char** argv) {
         }
         std::unique_ptr<AudioEngine> audio;
         std::vector<int16_t> pcm;
-        if (!shots.empty() || !wav.empty() || !scene.empty() || audio_on) {  // the screen-object model is on only when a picture or sound is asked for
+        if (!shots.empty() || !wav.empty() || !scene.empty() || audio_on || !mouse.empty()) {  // the screen-object model is on only when a picture or sound is asked for
             install_graphics(vm);
             vm.graphics->smooth = smooth;
             for (auto& s : shots) vm.shots[s.first] = s.second;
@@ -335,9 +274,98 @@ int main(int argc, char** argv) {
                 };
             }
             vm.on_shot = [](VM& v, const std::string& path) {
-                v.graphics->save_png(path);
+                if (amg::cursor_art::in_shots() && v.mouse_shown) {  // AMG_MOUSE_CURSOR_IN_SHOTS=1: the arrow where --mouse put it
+                    if (ImagePtr arrow = v.graphics->ui_image(20, 0))  // the pointer is the game's arrow (cursor_art.hpp)
+                        amg::cursor_art::set_source(arrow->w, arrow->h, arrow->px.data());
+                    std::vector<uint8_t> rgb = v.graphics->render();
+                    amg::cursor_art::stamp(rgb, SCREEN_W, SCREEN_H, int(SCREEN_W / 2 + v.mouse_at[0] * VIEW_UNIT),
+                                           int(SCREEN_H / 2 + v.mouse_at[1] * VIEW_UNIT), amg::cursor_art::size_for(SCREEN_H));
+                    Graphics::write_png(path, rgb, SCREEN_W, SCREEN_H);
+                } else {
+                    v.graphics->save_png(path);
+                }
                 std::ofstream f(path + ".txt", std::ios::binary);
                 f << v.graphics->describe() << '\n';
+            };
+        }
+        if (!mouse.empty() && vm.graphics) {
+            // The headless mouse: the same pointer as the window's (menu_pointer.hpp), fed from the list and the last picture.
+            std::sort(mouse.begin(), mouse.end(), [](const MouseAt& a, const MouseAt& b) { return a.tick < b.tick; });
+            auto previous = vm.on_tick;
+            struct MouseState {
+                MenuPointer first;   // the press bursts, for the screens with no registered menu
+                bool second = false; // the button was down
+                bool mode = false;   // mouse mode: set by a new mouse entry, ended by a --press
+                MouseMenus menus;    // the registered menus (mouse_menus.hpp)
+            };
+            auto state = std::make_shared<MouseState>();
+            vm.on_tick = [previous, state, mouse](VM& v) {
+                if (previous) previous(v);
+                const MouseAt* at = nullptr;
+                for (const MouseAt& m : mouse)
+                    if (m.tick <= v.tick) at = &m;
+                v.pointer_prev = v.pointer_mask;
+                v.pointer_mask = 0;
+                v.graphics->hide_uid = 0;
+                v.graphics->mark = Graphics::SelectionMark();
+                v.graphics->hide_image = nullptr;
+                if (!at) return;
+                const bool edge = at->tick == v.tick;  // flags that are one-tick events
+                // Mouse mode (mouse-native-design 2.5): a new place or button of the list starts it, a key or pad
+                // press (--press) ends it, and hover waits for the next entry of the list.
+                if (edge) state->mode = true;
+                for (const auto& p : v.presses)
+                    if (std::get<0>(p) == v.tick) {
+                        state->mode = false;
+                        state->menus.yield();
+                    }
+                const bool down = at->flags.find('d') != std::string::npos;
+                const bool click = down && !state->second;
+                state->second = down;
+                // X:Y are script units of the picture as shown (picture pixels / VIEW_UNIT from the middle), the same as the
+                // window's mouse after the letterbox; the pointer compares with the scene as drawn (Graphics::pointer_scene).
+                const Scene seen = Graphics::pointer_scene(*v.graphics->scene());
+                const double tu = seen.ui_u > 0 ? seen.ui_u : 1.0;
+                v.touch.update(down, seen.ui_ax + (at->x - seen.ui_ax) / tu, seen.ui_ay + (at->y - seen.ui_ay) / tu, v.tick);
+                v.mouse_shown = true;
+                v.mouse_at[0] = at->x;
+                v.mouse_at[1] = at->y;
+                const Scene* scene = &seen;
+                MenuPictures pics;
+                pics.cursor = v.graphics->ui_image(20, 0);
+                pics.tab = v.graphics->ui_image(47, 0);
+                pics.note = v.graphics->ui_image(33, 0);
+                pics.back = v.graphics->ui_image(62, 2);
+                pics.arrow = v.graphics->ui_image(7, 0);
+                pics.map_cursor = v.graphics->ui_image(25, 0);
+                for (int k = 0; k < 4; ++k) pics.map_arrow[k] = v.graphics->ui_image(28 + k, 0);
+                const int wheel = edge ? (at->flags.find('u') != std::string::npos) - (at->flags.find('n') != std::string::npos) : 0;
+                const bool right = edge && at->flags.find('r') != std::string::npos;
+                int menu_mask = 0;
+                const bool native = state->menus.update(v, *scene, at->x, at->y, true, down, click, right, wheel, menu_mask);
+                if (native) {
+                    state->first.yield();
+                    v.pointer_mask = menu_mask;
+                    if (state->mode) {
+                        v.graphics->hide_uid = state->menus.arrow_uid;
+                        v.graphics->mark = state->menus.mark;
+                        v.graphics->hide_image = pics.cursor;  // every menu arrow, not only the adapter's own
+                    }
+                } else {
+                    v.pointer_mask = state->first.update(*scene, pics, at->x, at->y, true, down, click, right, wheel);
+                }
+                static const bool log = std::getenv("AMG_MOUSE_LOG") != nullptr;
+                if (log) {  // one line per tick: the screen kind, the entry the game's cursor is on, the one under the mouse
+                    const MenuPointer::Probe& p = native ? state->menus.probe : state->first.probe;
+                    // arrow: the game's menu arrows (interface picture 20) drawn this frame in mouse mode (the audit wants 0
+                    // on a covered screen, tools/mouse_latency.py --check)
+                    int arrows = 0;
+                    if (state->mode)
+                        for (const DrawItem& it : seen.items)
+                            if (it.image && it.image == pics.cursor && it.alpha > 0.1 && it.uid != v.graphics->hide_uid && it.image != v.graphics->hide_image) ++arrows;
+                    std::fprintf(stderr, "mouse %lld %c sel=%s%.0f,%.0f tgt=%s%.0f,%.0f on=%d mask=%d arrow=%d\n", (long long)v.tick, p.kind,
+                                 p.has_sel ? "" : "!", p.sel_x, p.sel_y, p.has_tgt ? "" : "!", p.tgt_x, p.tgt_y, int(p.on), v.pointer_mask, arrows);
+                }
             };
         }
         // AMG_PROGRESS=N: every N ticks a line with the tick, the instructions, the main thread's innermost method and
@@ -367,6 +395,32 @@ int main(int argc, char** argv) {
                 std::fflush(stdout);
             };
         }
+        // AMG_VIEW_LOG=1: every tick, the drawn interface items as the view places them (uid, layer, centre, size,
+        // alpha), for tools/scale_stability.py (docs/technical/interface-scale.md, "Stability").
+        if (std::getenv("AMG_VIEW_LOG")) {
+            auto previous = vm.on_tick;
+            vm.on_tick = [previous](VM& v) {
+                if (previous) previous(v);
+                if (!v.graphics || !v.graphics->scene()) return;
+                const Scene seen = Graphics::view_scene(*v.graphics->scene());
+                std::string at = "-";
+                for (auto& th : v.threads)
+                    if (th->label == "main" && !th->frames.empty()) at = th->frames.back().method->cls->name;
+                std::printf("V %lld %s %zu\n", (long long)v.tick, at.c_str(), seen.items.size());
+                // AMG_VIEW_LOG=2 adds the item's anchor, its box size (screen pixels) and flags (t text, c content, s shrunk).
+                static const bool more = std::strcmp(std::getenv("AMG_VIEW_LOG"), "2") == 0;
+                for (const DrawItem& it : seen.items)
+                    if (it.layer >= UI_FIRST_LAYER && !it.snow && it.alpha > 0.01) {
+                        std::printf("%lld %lld %.2f %.2f %.3f %.3f %.2f", (long long)it.uid, (long long)it.layer, it.centre[0],
+                                    it.centre[1], it.scale[0], it.scale[1], it.alpha);
+                        if (more)
+                            std::printf(" %.2f %.2f %.1f %.1f %c%c%c", it.ui_ax, it.ui_ay, std::fabs(it.rect[2] * it.scale[0]),
+                                        std::fabs(it.rect[3] * it.scale[1]), it.text ? 't' : '-', it.content ? 'c' : '-',
+                                        it.shrunk ? 's' : '-');
+                        std::printf("\n");
+                    }
+            };
+        }
         g_running = &vm;
         std::signal(SIGTERM, stop_run);
         std::signal(SIGINT, stop_run);
@@ -377,7 +431,30 @@ int main(int argc, char** argv) {
                 if (v.tick >= tick_limit) v.max_steps = 0;  // every script thread ends at its next instruction
             };
         }
+#ifdef AMG_PERSONAL
+        // AMG_TEXT_DUMP=1: the on-screen text, when it becomes stable (docs/technical/personal.md); personal build only.
+        std::shared_ptr<amg::personal::TextTracker> text_tracker;
+        std::shared_ptr<long long> text_tick = std::make_shared<long long>(0);
+        if (std::getenv("AMG_TEXT_DUMP")) {
+            text_tracker = std::make_shared<amg::personal::TextTracker>();
+            text_tracker->history = [text_tick](const std::string& t) {
+                std::string flat;
+                for (char c : t) flat += c == '\n' ? std::string(" / ") : std::string(1, c);
+                std::printf("TEXT tick %lld: %s\n", *text_tick, flat.c_str());
+            };
+            auto previous = vm.on_tick;
+            vm.on_tick = [previous, text_tracker, text_tick](VM& v) {
+                if (previous) previous(v);
+                *text_tick = v.tick;
+                text_tracker->feed(*v.graphics->scene(), v.tick);
+            };
+        }
+#endif
+        amg::Sampler sampler;  // AMG_SAMPLE=FILE (sampler.hpp)
         std::string error = vm.run();
+#ifdef AMG_PERSONAL
+        if (text_tracker) text_tracker->finish();
+#endif
         if (!scene.empty() && !(vm.scene_queue.size() > 1 && vm.scene_done)) {
             // The scene that was running: with a list, the last one started (the earlier ones printed
             // their own DONE line).

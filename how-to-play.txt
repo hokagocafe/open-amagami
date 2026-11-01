@@ -1,42 +1,59 @@
 open-amagami - play Amagami (PS Vita) on Windows from your own copy
 =====================================================================
 
-You need your own copy of Amagami ebKore+ for PS Vita (PCSG00291), as a folder
-of decrypted files (AMAGAMI.IMG, SCENARIO.CPK, and either eboot.bin or
-extracted\eboot_decrypted.elf), or the Vita3K export root with app\PCSG00291.
-Nothing of the game is in this download.
-
-The sound check accepts packed archives or extracted voices and prepared audio.
-It warns which categories are missing; some folders do not include all of the game's sound data.
+You need your own copy of Amagami ebKore+ for PS Vita (PCSG00291), decrypted:
+the game's folder (AMAGAMI.IMG, SCENARIO.CPK, graph, sound and the executable)
+or a Vita3K install. The Japanese original and the English fan translation both
+work. Nothing of the game is in this download.
 
 HOW TO PLAY
 
   1. Run amagami.exe. The launcher opens.
      (If Windows says "Windows protected your PC": More info, then Run anyway.)
-  2. Press "Choose game folder..." and pick the folder of your copy.
-     Answer Yes to copy it into the program's own folder.
-     Required checks turn green when they are fine; an unlisted version may show a warning.
+  2. The launcher looks for your copy by itself (a Vita3K install, the desktop,
+     the downloads): if it finds one, press the big button to use it. Otherwise
+     press "Choose game folder..." and pick the folder of your copy (or the folder
+     above it), or drop the folder on the launcher. Answer Yes to copy it into the
+     program's own folder. The checks turn green when they are fine; an unknown
+     version may only warn.
   3. Press "Start game".
 
 The first time it offers an "Amagami" shortcut on the desktop and in the Start menu
-(Settings, "Desktop shortcut" makes them again). Next time, open it and press "Start game".
+(General tab, "Desktop shortcut" makes them again). Next time, open it and press "Start game".
 
 ENGLISH
   If your copy has the English fan translation (v1.1), the game is in English.
-  For a Japanese copy: Settings, "Add English patch...", pick the translation's folder.
+  For a Japanese copy: Game files tab, "Add English patch...", pick the translation's folder.
 
 CONTROLS
-  A gamepad works when plugged in. The mouse works in the menus.
+  A gamepad works when plugged in. The mouse works like the game's own cursor (hover lights
+  an entry, click chooses, right click goes back, the wheel moves): title, menus,
+  Settings, name entry, day map, gallery.
   Keyboard: Z confirm, X cancel, arrows move, Enter start, Backspace select,
             A square, S triangle, Q/W L/R, E/R L2/R2.
-  Change the keys in Settings, "Controls...".
+  Change the keys and the pad buttons in the Controls tab, "Controls...". A pad that is not
+  recognised: put a gamecontrollerdb.txt (SDL mapping lines) next to amagami.exe.
+  F8: settings over the game, which waits: the picture (window mode, screen filter,
+  brightness, gamma, vertical sync, a frames-per-second counter), the interface size,
+  controls, pad mapping and the language of these windows.
+  The same options are in the game's own menu: the last entry of the main menu,
+  "Port options" (left and right turn the pages).
   F11 or Alt+Enter: full screen.   Esc: quit.
+  The window opens at 80 % of your screen and remembers its size and place.
 
 SAVES AND UPDATES
-  Saves and settings: %APPDATA%\open-amagami (Settings, "Open saves folder").
-  The launcher says when a new version is out ("Get the new version").
-  To update, unpack it over this folder: saves and settings are kept.
+  Saves and settings: %APPDATA%\open-amagami (Game files tab, "Open saves folder").
+  The launcher says when a new version is out ("Get the new version"): press it and
+  answer Yes to install it (if that fails, nothing changes and the download page opens).
+  Or unpack the new zip over this folder. Saves and settings are kept either way.
+  A damaged save is moved aside into a folder "unreadable-..." in the saves folder, and
+  the next start is clean.
   Portable use: put an empty file named portable.txt next to amagami.exe.
+
+IF IT STOPS
+  A window says where the report is saved (crash.txt, in the saves and settings folder).
+  Send it with a description of what you were doing. After a failure at start-up the
+  launcher opens next time so you can check the game folder.
 
 HELP
   https://github.com/hokagocafe/open-amagami

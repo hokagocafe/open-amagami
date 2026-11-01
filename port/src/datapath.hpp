@@ -19,6 +19,10 @@
 #include <iterator>
 #include <stdexcept>
 #include <string>
+#include <vector>
+
+#include "inflate.hpp"
+#include "ui_text.hpp"
 
 namespace amg {
 
@@ -41,16 +45,44 @@ inline std::string data_file(const std::string& root, const std::string& rel) {
     return std::filesystem::exists(installed, ec) ? installed : prepared;
 }
 
-inline bool is_vita(const std::string& root) {
+// The folder the player picked may be a level or more above the game's own (a whole dump, a Vita3K `ux0`, the output of a
+// decryption tool that adds a title folder): the first folder up to `depth` levels down that holds the game's data.
+inline std::string find_game_root(const std::string& chosen, int depth = 4) {
     std::error_code ec;
-    return std::filesystem::exists(data_file(root, "graph/GRAPH.CPK"), ec);
+    auto holds_game = [](const std::string& dir) {
+        std::error_code e;
+        return std::filesystem::exists(data_file(dir, "AMAGAMI.IMG"), e) && std::filesystem::exists(data_file(dir, "SCENARIO.CPK"), e);
+    };
+    if (chosen.empty() || holds_game(chosen) || !std::filesystem::is_directory(chosen, ec)) return chosen;
+    // Breadth first, folders only (a dump has tens of thousands of files); at most 2,000 folders looked at, so picking a
+    // whole drive by mistake ends quickly instead of walking it.
+    std::vector<std::string> level = {chosen};
+    int visited = 0;
+    for (int d = 0; d < depth; ++d) {
+        std::vector<std::string> next;
+        for (const std::string& dir : level)
+            for (std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+                if (!it->is_directory(ec)) continue;
+                if (++visited > 2000) return chosen;
+                try {  // a folder whose name the program's code page cannot hold (`string()` throws) is skipped
+                    const std::string name = it->path().filename().string();
+                    if (name == "extracted" || name == "sound" || name == "graph" || name == "sce_sys" || name == "lang") continue;
+                    if (holds_game(it->path().string())) return it->path().string();
+                    next.push_back(it->path().string());
+                } catch (const std::exception&) {
+                }
+            }
+        level = std::move(next);
+    }
+    return chosen;
 }
 
 inline std::string vita_exe_file(const std::string& root) {
     std::error_code ec;
     // The port's static Vita tables match the installed app executable; a patch eboot can relocate or replace them.
-    for (const std::string& path : {root + "/extracted/eboot_decrypted.elf", root + "/eboot.bin",
-                                    root + "/app/PCSG00291/eboot.bin", root + "/patch/PCSG00291/eboot.bin"}) {
+    for (const std::string& path : {root + "/extracted/eboot_decrypted.elf", root + "/eboot_decrypted.elf",
+                                    root + "/eboot.elf", root + "/eboot.bin", root + "/app/PCSG00291/eboot.bin",
+                                    root + "/patch/PCSG00291/eboot.bin"}) {
         ec.clear();
         if (std::filesystem::is_regular_file(path, ec) && std::filesystem::file_size(path, ec) > 0 && !ec) return path;
     }
@@ -102,7 +134,7 @@ inline std::string vita_exe(const std::string& root) {
     const std::string path = vita_exe_file(root);
     if (path.empty()) throw std::runtime_error("no eboot.bin (or extracted/eboot_decrypted.elf) in " + root);
     std::string elf = slurp(path);
-    if (path == root + "/extracted/eboot_decrypted.elf") return elf;
+    if (elf.size() >= 4 && uint8_t(elf[0]) == 0x7f && elf.compare(1, 3, "ELF") == 0) return elf;  // already a plain ELF, whatever its name
     std::string self = std::move(elf);
     if (self.size() < 0x80 || std::memcmp(self.data(), "SCE\0", 4) != 0)
         throw std::runtime_error("eboot.bin has an unexpected header");
@@ -128,10 +160,19 @@ inline std::string vita_exe(const std::string& root) {
         std::memcpy(&p_offset, self.data() + phdr_off + 32 * i + 4, 4);
         uint64_t so = u64(size_t(seg_off + 0x20 * i)), len = u64(size_t(seg_off + 0x20 * i + 8)),
                  compression = u64(size_t(seg_off + 0x20 * i + 16)), encryption = u64(size_t(seg_off + 0x20 * i + 24));
-        if (encryption != 2 || compression != 1)
+        if (encryption != 2 || (compression != 1 && compression != 2))
             throw std::runtime_error(
-                "eboot.bin is encrypted or compressed: use a copy whose executable has been decrypted (the port does not decrypt)");
-        if (so + len > self.size() || p_offset + len > elf.size()) throw std::runtime_error("eboot.bin: segment out of range");
+                "eboot.bin is still encrypted: use a copy whose executable has been decrypted (the port does not decrypt)");
+        if (so + len > self.size()) throw std::runtime_error("eboot.bin: segment out of range");
+        if (compression == 2) {  // a decrypted copy can still carry its segments compressed (zlib)
+            uint32_t file_size;
+            std::memcpy(&file_size, self.data() + phdr_off + 32 * i + 16, 4);
+            std::string plain = inflate_zlib(reinterpret_cast<const uint8_t*>(self.data()) + so, size_t(len), file_size);
+            if (p_offset + plain.size() > elf.size()) throw std::runtime_error("eboot.bin: segment out of range");
+            std::memcpy(elf.data() + p_offset, plain.data(), plain.size());
+            continue;
+        }
+        if (p_offset + len > elf.size()) throw std::runtime_error("eboot.bin: segment out of range");
         std::memcpy(elf.data() + p_offset, self.data() + so, size_t(len));
     }
     return elf;
@@ -174,29 +215,57 @@ inline size_t vita_va_to_off(const std::string& elf, uint32_t va, const char* so
 // required: without them the game plays silent.
 inline std::string check_game_folder(const std::string& root) {
     std::error_code ec;
-    if (!std::filesystem::is_directory(root, ec)) return "That folder does not exist.";
+    if (!std::filesystem::is_directory(root, ec)) return ui::tr("That folder does not exist.");
     std::string missing;
     for (const char* rel : {"AMAGAMI.IMG", "SCENARIO.CPK", "graph/GRAPH.CPK"})
         if (!std::filesystem::exists(data_file(root, rel), ec)) missing += std::string("\n  ") + rel;
     if (!missing.empty())
-        return "This does not look like the game's folder for the PS Vita version (PCSG00291). Missing:" + missing +
-               "\n\nChoose the folder that holds AMAGAMI.IMG, SCENARIO.CPK, graph and sound.";
-    for (const char* rel : {"SCENARIO.CPK", "graph/GRAPH.CPK"}) {
-        std::ifstream f(data_file(root, rel), std::ios::binary);
+        return ui::fmt("This does not look like the game's folder for the PS Vita version (PCSG00291). Missing:{0}\n\nChoose the folder that holds AMAGAMI.IMG, SCENARIO.CPK, graph and sound.", {missing});
+    for (const char* rel : {"AMAGAMI.IMG", "SCENARIO.CPK", "graph/GRAPH.CPK"}) {
+        const std::string path = data_file(root, rel);
+        std::ifstream f(path, std::ios::binary);
+        if (!f)
+            return ui::fmt("{0} cannot be opened. Is another program using it, or is access to it denied? Close the other program, or copy the game's files to a folder of your own and choose that one.", {rel});
+        if (std::filesystem::file_size(path, ec) == 0 && !ec)
+            return ui::fmt("{0} is empty. Copy the game's files again from your original and choose the folder again.", {rel});
+        if (std::strcmp(rel, "AMAGAMI.IMG") == 0) continue;  // not an archive: its content is checked by the launcher's list
         char magic[4] = {};
         f.read(magic, 4);
         if (std::memcmp(magic, "CPK ", 4) != 0)
-            return std::string(rel) +
-                   " is not readable: it is still encrypted by the console's file system. This program does not decrypt "
-                   "games; use a copy whose files have been decrypted (a dump made with the usual homebrew tools).";
+            return ui::fmt("{0} is not readable: it is still encrypted by the console's file system. This program does not decrypt games; use a copy whose files have been decrypted (a dump made with the usual homebrew tools).", {rel});
     }
     try {
         vita_exe(root);
     } catch (const std::exception& e) {
-        return std::string(e.what()) +
-               "\n\nThe game's executable (eboot.bin) must be a decrypted copy. This program does not decrypt it.";
+        if (std::strstr(e.what(), "still encrypted"))
+            return ui::tr("The game's executable (eboot.bin) is still encrypted. This program does not decrypt games: use a copy whose executable has been decrypted.");
+        return ui::tr("The game's executable (eboot.bin) is damaged, or it is not the game's. Copy it again from your decrypted copy.");
     }
     return "";
+}
+
+// Copies of the game that are already on this machine and that `check_game_folder` accepts: each base folder (a Vita3K
+// install, the program's own game folder, the desktop and the downloads) is searched down a few levels
+// (`find_game_root`); the first copy of each base is kept, without repeats. `known` is skipped (the folder the launcher
+// already shows).
+inline std::vector<std::string> find_installed_copies(const std::vector<std::string>& bases, const std::string& known = "") {
+    std::vector<std::string> found;
+    std::error_code ec;
+    for (const std::string& base : bases) {
+        if (base.empty() || !std::filesystem::is_directory(base, ec)) continue;
+        std::string root;
+        try {
+            root = find_game_root(base, 4);
+            if (!check_game_folder(root).empty() || root == known) continue;
+        } catch (const std::exception&) {
+            continue;  // a search must never end the program
+        }
+        bool again = false;
+        for (const std::string& f : found)
+            if (std::filesystem::equivalent(f, root, ec)) again = true;
+        if (!again) found.push_back(root);
+    }
+    return found;
 }
 
 }  // namespace amg

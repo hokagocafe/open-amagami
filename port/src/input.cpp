@@ -1,10 +1,17 @@
 #include "input.hpp"
 
+#include "paths.hpp"
+#include "ui_text.hpp"
+
 #include <SDL3/SDL.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <cstdlib>
 #include <string>
 #include <mutex>
@@ -31,6 +38,75 @@ bool g_started = false;
 SDL_Joystick* g_fake = nullptr;
 int g_fake_frame = 0, g_fake_tap_at = -1;
 
+
+// The game's buttons in the order the rebinding window lists them, with their config.ini names and default keys (Windows
+// virtual-key codes: arrows 0x25 to 0x28, Backspace 0x08, Enter 0x0D, letters their capital's code).
+const GameButton BUTTONS[] = {
+    {4096, "up", "Up", 0x26},          {16384, "down", "Down", 0x28},      {32768, "left", "Left", 0x25},
+    {8192, "right", "Right", 0x27},    {32, "confirm", "Confirm (circle)", 'Z'}, {64, "cancel", "Cancel (cross)", 'X'},
+    {128, "square", "Square", 'A'},    {16, "triangle", "Triangle", 'S'},  {4, "l", "L", 'Q'},
+    {8, "r", "R", 'W'},                {1, "l2", "L2", 'E'},               {2, "r2", "R2", 'R'},
+    {2048, "start", "Start", 0x0D},    {256, "select", "Select", 0x08},
+};
+constexpr int BUTTON_COUNT = int(sizeof(BUTTONS) / sizeof(BUTTONS[0]));
+int g_keys[BUTTON_COUNT] = {};  // the key of each BUTTONS entry; 0 until load_keys (then the defaults)
+
+void ensure_keys() {
+    if (g_keys[0]) return;
+    for (int i = 0; i < BUTTON_COUNT; ++i) g_keys[i] = BUTTONS[i].default_key;
+}
+
+
+// What a pad can give to a game button (F5-14): SDL's standard buttons, and the two triggers (read as buttons).
+struct PadSourceDef {
+    const char* name;   // in config.ini: pad_<button>=<name>
+    const char* label;  // in the rebinding window
+    int button;         // an SDL_GamepadButton, or -1 for a trigger
+    int axis;           // the trigger's SDL_GamepadAxis
+};
+const PadSourceDef PAD_SOURCES[] = {
+    {"south", "South button", SDL_GAMEPAD_BUTTON_SOUTH, 0},
+    {"east", "East button", SDL_GAMEPAD_BUTTON_EAST, 0},
+    {"west", "West button", SDL_GAMEPAD_BUTTON_WEST, 0},
+    {"north", "North button", SDL_GAMEPAD_BUTTON_NORTH, 0},
+    {"leftshoulder", "Left shoulder", SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, 0},
+    {"rightshoulder", "Right shoulder", SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, 0},
+    {"lefttrigger", "Left trigger", -1, SDL_GAMEPAD_AXIS_LEFT_TRIGGER},
+    {"righttrigger", "Right trigger", -1, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER},
+    {"back", "Back button", SDL_GAMEPAD_BUTTON_BACK, 0},
+    {"start", "Start button", SDL_GAMEPAD_BUTTON_START, 0},
+    {"dpup", "D-pad up", SDL_GAMEPAD_BUTTON_DPAD_UP, 0},
+    {"dpdown", "D-pad down", SDL_GAMEPAD_BUTTON_DPAD_DOWN, 0},
+    {"dpleft", "D-pad left", SDL_GAMEPAD_BUTTON_DPAD_LEFT, 0},
+    {"dpright", "D-pad right", SDL_GAMEPAD_BUTTON_DPAD_RIGHT, 0},
+    {"leftstick", "Left stick click", SDL_GAMEPAD_BUTTON_LEFT_STICK, 0},
+    {"rightstick", "Right stick click", SDL_GAMEPAD_BUTTON_RIGHT_STICK, 0},
+};
+constexpr int PAD_SOURCE_COUNT = int(sizeof(PAD_SOURCES) / sizeof(PAD_SOURCES[0]));
+int g_pad_source[BUTTON_COUNT] = {-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1};  // chosen per game button; -1: automatic
+
+int pad_source_index(const std::string& name) {
+    for (int i = 0; i < PAD_SOURCE_COUNT; ++i)
+        if (name == PAD_SOURCES[i].name) return i;
+    return -1;
+}
+
+bool source_down(SDL_Gamepad* g, int source) {
+    const PadSourceDef& d = PAD_SOURCES[source];
+    if (d.button >= 0) return SDL_GetGamepadButton(g, SDL_GamepadButton(d.button));
+    return SDL_GetGamepadAxis(g, SDL_GamepadAxis(d.axis)) > 4000;  // about an eighth of the travel (SDL: 0..32767)
+}
+
+// The source a game button reads when the player has not chosen one: the d-pad, the face buttons by position (the circle on
+// the south button when asked, or on an Xbox pad), the shoulders and triggers, start and back.
+int automatic_source(int button, bool south_confirm) {
+    static const char* const NAMES[BUTTON_COUNT] = {"dpup", "dpdown", "dpleft", "dpright", "", "", "west", "north",
+                                                    "leftshoulder", "rightshoulder", "lefttrigger", "righttrigger", "start", "back"};
+    if (button == 4) return pad_source_index(south_confirm ? "south" : "east");
+    if (button == 5) return pad_source_index(south_confirm ? "east" : "south");
+    return pad_source_index(NAMES[button]);
+}
+
 Family family_of_type(SDL_GamepadType type) {
     switch (type) {
         case SDL_GAMEPAD_TYPE_XBOX360:
@@ -53,24 +129,12 @@ bool confirm_on_south(Family family) {
 
 int read_pad(Pad& pad, std::array<int, 4>& axes, bool& deflected) {
     SDL_Gamepad* g = pad.handle;
-    auto button = [&](SDL_GamepadButton b) { return SDL_GetGamepadButton(g, b); };
     int mask = 0;
     const bool south_confirm = confirm_on_south(pad.family);
-    if (button(south_confirm ? SDL_GAMEPAD_BUTTON_SOUTH : SDL_GAMEPAD_BUTTON_EAST)) mask |= 32;   // circle: confirm
-    if (button(south_confirm ? SDL_GAMEPAD_BUTTON_EAST : SDL_GAMEPAD_BUTTON_SOUTH)) mask |= 64;   // cross: cancel
-    if (button(SDL_GAMEPAD_BUTTON_WEST)) mask |= 128;                                              // square
-    if (button(SDL_GAMEPAD_BUTTON_NORTH)) mask |= 16;                                              // triangle
-    if (button(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)) mask |= 4;                                       // L1
-    if (button(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)) mask |= 8;                                      // R1
-    if (button(SDL_GAMEPAD_BUTTON_START)) mask |= 2048;
-    if (button(SDL_GAMEPAD_BUTTON_BACK)) mask |= 256;
-    if (button(SDL_GAMEPAD_BUTTON_DPAD_UP)) mask |= 4096;
-    if (button(SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) mask |= 8192;
-    if (button(SDL_GAMEPAD_BUTTON_DPAD_DOWN)) mask |= 16384;
-    if (button(SDL_GAMEPAD_BUTTON_DPAD_LEFT)) mask |= 32768;
-    const int TRIGGER = 4000;  // about an eighth of the travel (SDL: 0..32767)
-    if (SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > TRIGGER) mask |= 1;   // L2
-    if (SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > TRIGGER) mask |= 2;  // R2
+    for (int i = 0; i < BUTTON_COUNT; ++i) {
+        const int source = g_pad_source[i] >= 0 ? g_pad_source[i] : automatic_source(i, south_confirm);
+        if (source >= 0 && source_down(g, source)) mask |= BUTTONS[i].mask;
+    }
     int lx = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX), ly = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY);
     int rx = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTX), ry = SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTY);
     const int DEAD = 16000;  // about half way: the stick acts as a d-pad, so it must be deliberate
@@ -80,7 +144,9 @@ int read_pad(Pad& pad, std::array<int, 4>& axes, bool& deflected) {
     if (lx > DEAD) mask |= 8192;
     // SDL's y grows downwards, as the engine's bytes do (docs/technical/scf-vm.md): -32768..32767 to -128..127
     auto scale = [](int v) { int x = v / 256; return x < -128 ? -128 : x > 127 ? 127 : x; };
-    axes = {scale(rx), scale(ry), scale(lx), scale(ly)};
+    // FIDELITY: the Vita's order is lx, ly, rx, ry (0x81001D50, read twice: docs/technical/d1-menus-and-pad.md). The PS2's was
+    // the right stick first, which sent the day map's analog(4) (the left stick's length) the right stick's.
+    axes = {scale(lx), scale(ly), scale(rx), scale(ry)};
     deflected = std::abs(lx) > DEAD || std::abs(ly) > DEAD || std::abs(rx) > DEAD || std::abs(ry) > DEAD;
     return mask;
 }
@@ -152,26 +218,6 @@ void refresh_list() {
 
 }  // namespace
 
-namespace {
-
-// The game's buttons in the order the rebinding window lists them, with their config.ini names and default keys (Windows
-// virtual-key codes: arrows 0x25 to 0x28, Backspace 0x08, Enter 0x0D, letters their capital's code).
-const GameButton BUTTONS[] = {
-    {4096, "up", "Up", 0x26},          {16384, "down", "Down", 0x28},      {32768, "left", "Left", 0x25},
-    {8192, "right", "Right", 0x27},    {32, "confirm", "Confirm (circle)", 'Z'}, {64, "cancel", "Cancel (cross)", 'X'},
-    {128, "square", "Square", 'A'},    {16, "triangle", "Triangle", 'S'},  {4, "l", "L", 'Q'},
-    {8, "r", "R", 'W'},                {1, "l2", "L2", 'E'},               {2, "r2", "R2", 'R'},
-    {2048, "start", "Start", 0x0D},    {256, "select", "Select", 0x08},
-};
-constexpr int BUTTON_COUNT = int(sizeof(BUTTONS) / sizeof(BUTTONS[0]));
-int g_keys[BUTTON_COUNT] = {};  // the key of each BUTTONS entry; 0 until load_keys (then the defaults)
-
-void ensure_keys() {
-    if (g_keys[0]) return;
-    for (int i = 0; i < BUTTON_COUNT; ++i) g_keys[i] = BUTTONS[i].default_key;
-}
-
-}  // namespace
 
 const GameButton* game_buttons(int* count) {
     *count = BUTTON_COUNT;
@@ -179,7 +225,7 @@ const GameButton* game_buttons(int* count) {
 }
 
 bool reserved_key(int vk) {
-    return vk == 0x1B || vk == 0x78 || vk == 0x79 || vk == 0x7A;  // Esc (quit), F9 (screenshot), F10 (dump), F11 (full screen)
+    return vk == 0x1B || vk == 0x77 || vk == 0x78 || vk == 0x79 || vk == 0x7A;  // Esc (quit), F8 (settings), F9 (screenshot), F10 (dump), F11 (full screen)
 }
 
 KeyLabel label_of_key(int vk) {
@@ -279,9 +325,110 @@ bool init(const Settings& settings, const std::string& fake) {
         return false;
     }
     SDL_SetGamepadEventsEnabled(false);  // the state is polled once per frame; nothing reads the event queue
+    // A pad SDL does not know can be added by the player: SDL's own database format (gamecontrollerdb.txt, one mapping
+    // per line, as the SDL community tools make them), read when the file is beside the program.
+    const char* base = SDL_GetBasePath();
+    for (const std::string& db : {pad_database_file(), base ? std::string(base) + "gamecontrollerdb.txt" : std::string()}) {
+        if (db.empty()) continue;
+        if (std::FILE* f = std::fopen(db.c_str(), "rb")) {
+            std::fclose(f);
+            const int added = SDL_AddGamepadMappingsFromFile(db.c_str());
+            if (added >= 0) std::fprintf(stderr, "%s: %d mappings\n", db.c_str(), added);
+        }
+    }
     g_started = true;
     if (!fake.empty()) attach_virtual(fake);
     return true;
+}
+
+std::string pad_database_file() {
+    const std::string config = paths::config_file();
+    if (config.empty()) return "";
+    return (std::filesystem::u8path(config).parent_path() / "gamecontrollerdb.txt").string();
+}
+
+int save_pad_mappings(const std::string& text, std::string& error) {
+    std::vector<std::string> lines;
+    std::istringstream in(text);
+    int number = 0;
+    for (std::string line; std::getline(in, line);) {
+        ++number;
+        while (!line.empty() && (line.back() == 13 || line.back() == ' ' || line.back() == 9)) line.pop_back();
+        const size_t first = line.find_first_not_of(" \t");
+        if (first == std::string::npos || line[first] == '#') continue;
+        line = line.substr(first);
+        // GUID,name,a:b0,b:b1,...: a 32-digit hexadecimal GUID, a name, and at least one button or axis.
+        const size_t c1 = line.find(',');
+        const size_t c2 = c1 == std::string::npos ? c1 : line.find(',', c1 + 1);
+        bool ok = c2 != std::string::npos && c1 == 32 && line.find(':', c2) != std::string::npos;
+        for (size_t i = 0; ok && i < c1; ++i) ok = std::isxdigit((unsigned char)line[i]) != 0;
+        if (!ok) {
+            error = ui::fmt("Line {0} is not a mapping: it should start with the pad's 32-digit code, then its name, then entries such as a:b0.", {std::to_string(number)});
+            return -1;
+        }
+        lines.push_back(line);
+    }
+    const std::string path = pad_database_file();
+    if (path.empty()) {
+        error = ui::tr("There is no place to keep the mapping.");
+        return -1;
+    }
+    std::string have;
+    {
+        std::ifstream existing(path);
+        have.assign(std::istreambuf_iterator<char>(existing), std::istreambuf_iterator<char>());
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    std::ofstream out(path, std::ios::app);
+    if (!out) {
+        error = ui::fmt("The file could not be written: {0}", {path});
+        return -1;
+    }
+    int added = 0;
+    for (const std::string& line : lines) {
+        if (have.find(line) != std::string::npos) continue;  // already there
+        out << line << char(10);
+        have += line + char(10);
+        ++added;
+    }
+    return added;
+}
+
+int pad_source_count() { return PAD_SOURCE_COUNT; }
+const char* pad_source_name(int source) { return PAD_SOURCES[source].name; }
+const char* pad_source_label(int source) { return PAD_SOURCES[source].label; }
+
+int pad_source(int button) { return button >= 0 && button < BUTTON_COUNT ? g_pad_source[button] : -1; }
+
+void set_pad_source(int button, int source) {
+    if (button >= 0 && button < BUTTON_COUNT) g_pad_source[button] = source >= 0 && source < PAD_SOURCE_COUNT ? source : -1;
+}
+
+void load_pad_buttons(const std::function<std::string(const std::string&)>& read) {
+    for (int i = 0; i < BUTTON_COUNT; ++i) g_pad_source[i] = pad_source_index(read(std::string("pad_") + BUTTONS[i].name));
+}
+
+bool active() { return g_started; }
+
+int take_pad_press() {
+    if (!g_started) return -1;
+    if (g_fake && g_fake_tap_at >= 0) {  // a scripted press of the virtual pad's south button, for tests
+        ++g_fake_frame;
+        SDL_SetJoystickVirtualButton(g_fake, SDL_GAMEPAD_BUTTON_SOUTH, g_fake_frame >= g_fake_tap_at && g_fake_frame < g_fake_tap_at + 8);
+    }
+    SDL_UpdateGamepads();
+    refresh_list();
+    static unsigned prev = 0;
+    unsigned now = 0;
+    for (Pad& pad : g_pads)
+        for (int i = 0; i < PAD_SOURCE_COUNT; ++i)
+            if (source_down(pad.handle, i)) now |= 1u << i;
+    const unsigned fresh = now & ~prev;
+    prev = now;
+    for (int i = 0; i < PAD_SOURCE_COUNT; ++i)
+        if (fresh & (1u << i)) return i;
+    return -1;
 }
 
 void shutdown() {

@@ -32,10 +32,14 @@ public:
     size_t take_uploaded_bytes();
     // Draws the last frame again: after an expose or a resize.
     void redraw();
-    // How the frame is scaled to the window: 0 smooth (crisp at whole multiples), 1 sharp bilinear, 2 pixels (nearest).
+    // How the frame is scaled to the window: 0 smooth (crisp at whole multiples), 1 sharp bilinear, 2 pixels (nearest), 3 bicubic, 4 Lanczos, 5 sharpen (contrast adaptive).
     void set_filter(int mode);
-    // How the frame sits in the window: 0 fit (bars), 1 fill (crops), 2 stretch, 3 whole multiples of the frame.
+    // How the frame sits in the window: 0 fit (bars), 1 fill (crops), 2 stretch, 3 whole multiples of the frame, 4 fit over a blurred, darkened copy of the frame.
     void set_aspect(int mode);
+    // Wait for the display's refresh when a frame is shown (true, the default) or show it at once (may tear).
+    void set_vsync(bool on);
+    // The player's picture: brightness as a factor (1 leaves the picture alone), gamma as in a monitor's setting (1 leaves it).
+    void set_tone(float brightness, float gamma);
     // The scene is drawn at this many times the frame, 1 to 4 (0: follows the window). Takes effect on the next frame.
     void set_render_scale(int k);
     void resize(int client_w, int client_h);

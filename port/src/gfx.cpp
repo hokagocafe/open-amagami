@@ -13,14 +13,13 @@
 #include <fstream>
 #include <sstream>
 #include <thread>
+#include <unordered_map>
 #include <stdexcept>
 
 namespace amg {
 
 namespace {
 
-constexpr uint32_t TEXTURE_TABLE = 0x1AFD00, TEXTURE_RECORD = 36, VRAM = 0x100000, FILE_OFFSET = 0x1000;
-constexpr uint32_t ACTOR_INDEX = 0x28ADF8, ACTOR_FILES = 0x1B2A28, ACTOR_POSES = 26;
 constexpr double PI = 3.14159265358979323846;
 
 uint32_t le32(const std::string& d, size_t at) {
@@ -34,12 +33,6 @@ float lef(const std::string& d, size_t at) {
     float f;
     std::memcpy(&f, &v, 4);
     return f;
-}
-
-uint32_t name_hash(const std::string& name) {
-    uint32_t h = 0;
-    for (unsigned char c : name) h = h * 16301u + c;
-    return h;
 }
 
 // "menu_main%1d", "txt_%03d", "node_flag%02d": one decimal field with optional zero padding.
@@ -70,72 +63,6 @@ std::string format_number(const std::string& pattern, int64_t value) {
     return out;
 }
 
-int unswizzle(int index) { return ((index & 0x18) == 0x08 || (index & 0x18) == 0x10) ? (index ^ 0x18) : index; }
-
-// TIM2 (docs/technical/images.md): one picture, 4- or 8-bit indexed, 32-bit palette.
-struct Tim2 {
-    int type = 0, w = 0, h = 0;
-    std::string pixels, clut;
-};
-
-bool parse_tim2(const std::string& d, Tim2& out) {
-    if (d.size() < 64 || d.compare(0, 4, "TIM2") != 0) return false;
-    int alignment = uint8_t(d[5]), count = le16(d, 6);
-    if (alignment != 0 || count != 1) return false;
-    uint32_t clut_size = le32(d, 20), image_size = le32(d, 24);
-    int header_size = le16(d, 28);
-    int clut_type = uint8_t(d[16 + 18]), image_type = uint8_t(d[16 + 19]);
-    out.w = le16(d, 16 + 20);
-    out.h = le16(d, 16 + 22);
-    if (header_size != 48 || (image_type != 4 && image_type != 5) || clut_type != 3) return false;
-    out.type = image_type;
-    out.pixels = d.substr(64, image_size);
-    out.clut = d.substr(64 + image_size, clut_size);
-    return true;
-}
-
-ImagePtr decode_image(const std::string& data, const std::string& shared_palette) {
-    Tim2 t;
-    if (!parse_tim2(data, t)) throw std::runtime_error("unsupported TIM2");
-    std::vector<std::array<uint8_t, 4>> entries;
-    auto split = [&](const std::string& pal) {
-        std::vector<std::array<uint8_t, 4>> e;
-        for (size_t i = 0; i + 4 <= pal.size(); i += 4)
-            e.push_back({uint8_t(pal[i]), uint8_t(pal[i + 1]), uint8_t(pal[i + 2]), uint8_t(pal[i + 3])});
-        return e;
-    };
-    if (!t.clut.empty()) {
-        entries = split(t.clut);
-        if (t.type == 5) {
-            auto copy = entries;
-            for (size_t i = 0; i < entries.size(); ++i) entries[i] = copy.at(size_t(unswizzle(int(i))));
-        }
-    } else {
-        auto copy = split(shared_palette);
-        entries = copy;
-        for (size_t i = 0; i < entries.size(); ++i) entries[i] = copy.at(size_t(unswizzle(int(i))));
-    }
-    auto img = std::make_shared<Image>();
-    img->w = t.w;
-    img->h = t.h;
-    img->px.resize(size_t(t.w) * size_t(t.h) * 4);
-    for (int y = 0; y < t.h; ++y) {
-        for (int x = 0; x < t.w; ++x) {
-            size_t n = size_t(y) * size_t(t.w) + size_t(x);
-            int index;
-            if (t.type == 4) {
-                uint8_t byte = uint8_t(t.pixels.at(n / 2));
-                index = (n & 1) ? (byte >> 4) : (byte & 0x0F);
-            } else {
-                index = uint8_t(t.pixels.at(n));
-            }
-            const auto& e = entries.at(size_t(index));
-            std::memcpy(&img->px[n * 4], e.data(), 4);
-        }
-    }
-    return img;
-}
-
 // Every GRAPH.CPK picture (docs/technical/vita-cpk-format.md): a 256-colour palette (1,024 bytes, alpha 0-255),
 // then one 8-bit index per pixel, row by row, no header; the width is fixed per directory and the height follows
 // from the size. The .gxt files (bg/, epi/, body/) keep their palette as BGRA, the .tm2 ones (face/, eface/,
@@ -148,14 +75,19 @@ ImagePtr decode_gxt(const std::string& data, int width, bool bgr) {
     img->w = width;
     img->h = h;
     img->px.resize(size_t(width) * size_t(h) * 4);
-    for (size_t n = 0; n < size_t(width) * size_t(h); ++n) {
-        const uint8_t* c = pal + 4 * pal[1024 + n];
-        uint8_t* dst = &img->px[n * 4];
-        dst[0] = bgr ? c[2] : c[0];
-        dst[1] = c[1];
-        dst[2] = bgr ? c[0] : c[2];
-        dst[3] = uint8_t((unsigned(c[3]) * 128 + 127) / 255);  // PS2 alpha scale, 0x80 opaque
+    // The palette expanded once to four bytes per entry (alpha in the 0..128 scale, 0x80 opaque), then one copy per
+    // texel: these pictures are 1.5 million texels and are decoded in the middle of a scene.
+    uint8_t lut[256][4];
+    for (int i = 0; i < 256; ++i) {
+        const uint8_t* c = pal + 4 * i;
+        lut[i][0] = bgr ? c[2] : c[0];
+        lut[i][1] = c[1];
+        lut[i][2] = bgr ? c[0] : c[2];
+        lut[i][3] = uint8_t((unsigned(c[3]) * 128 + 127) / 255);
     }
+    const uint8_t* index = pal + 1024;
+    uint8_t* out = img->px.data();
+    for (size_t n = 0, count = size_t(width) * size_t(h); n < count; ++n) std::memcpy(out + n * 4, lut[index[n]], 4);
     return img;
 }
 
@@ -175,7 +107,7 @@ bool vita_gxt_layout(const std::string& name, std::string& ext, int& width, bool
     }
     if (name.compare(0, 5, "face/") == 0 || name.compare(0, 6, "eface/") == 0 || name.compare(0, 5, "font/") == 0) {
         ext = ".tm2";
-        width = 1024;  // face/, eface/ 1024x1024; font/ 1024x3300 (width assumed the same, hypothesis)
+        width = 1024;  // face/, eface/ 1024x1024; font/ 1024 wide, 4-bit (vita-cpk-format.md, confirmed)
         bgr = false;
         return true;
     }
@@ -280,7 +212,7 @@ void Tween::finish() {
     }
 }
 
-Vib::Vib(const std::vector<double>& initial, bool scale_) : scale(scale_) {
+Vib::Vib(const std::vector<double>& initial, bool scale_, bool position_) : scale(scale_), position(position_) {
     parts[0] = Tween(initial);
     parts[1] = Tween(std::vector<double>(initial.size(), 0.0));
     parts[2] = Tween(std::vector<double>(initial.size(), 0.0));
@@ -305,6 +237,12 @@ std::vector<double> Vib::value() const {
     const auto& amp = parts[1].current;
     const auto& freq = parts[2].current;
     std::vector<double> out;
+    if (position && base.size() == 2) {
+        // FIDELITY: read 0x8108E152 and 0x8108E1D0 (ActorPicture's step), the same in the 18 object steps with a position
+        // wave (vita-executable.md): both waves are added to Y, none to X.
+        auto wave = [&](size_t i) { return std::sin(phase.at(i) * freq.at(i) * PI / 30.0) * amp.at(i); };
+        return {base[0], base[1] + wave(0) + wave(1)};
+    }
     for (size_t i = 0; i < base.size(); ++i) {
         double wave = std::sin(phase.at(i) * freq.at(i) * PI / 30.0) * amp.at(i);
         if (!scale) out.push_back(base[i] + wave);
@@ -369,6 +307,10 @@ void ScreenObject::step(double dt) {
     pos.step(dt);
     zoom.step(dt);
     spin.step(dt);
+    if (sway_phase >= 0) {
+        sway_phase += dt;
+        if (sway_phase >= 60.0) sway_phase -= 60.0;
+    }
 }
 
 void ScreenObject::fill(DrawItem& item) const {
@@ -380,6 +322,7 @@ void ScreenObject::fill(DrawItem& item) const {
     auto l = light.value();
     for (int i = 0; i < 3; ++i) item.light[i] = l[size_t(i)];
     placement(item.centre, item.scale);
+    if (sway_phase >= 30.0) item.centre[1] -= 3.0;  // FIDELITY: read 0x81095000 (NodeIcon step)
     item.angle = spin.value();
     item.scale_on_screen = scale_on_screen;
     item.follow = follow;
@@ -403,77 +346,171 @@ void ScreenObject::placement(double centre[2], double scale[2]) const {
 
 namespace {
 
-// Falling snow: an APPROXIMATION (see objects.md). A shared little generator keeps the flakes
-// identical to the reference model's.
+// SnowEffect (K2R_CObjSnow with a K2R_CObjSnowFlake each), read from the Vita executable (docs/technical/vita-executable.md,
+// "Snow manager"): flakes live in a 3D box in front of a camera and are projected to the screen. A flake is born at a random
+// place (x within +-d1/200, y within [-d2/100, 0), z within [d3/100, (d3 + d4)/100)) with a random size and a speed down
+// (+y) of size * the preset's size * about 1/12 a frame, a tenth of that sideways and in depth; it dies when y passes 0.
+// While fewer flakes live than the target, a new one is born with chance 1/4 each frame; setAmount moves the target
+// linearly. The camera looks along (-sin yaw cos pitch, -sin pitch, cos yaw cos pitch) from the moveCam position, and the
+// projection is x * 512 / depth on both axes (then * 0.75 into the scripts' units).
+// FIDELITY: read 0x81095BF8 (the manager's step), 0x8109572C (a flake's step), 0x810818D8 (birth), 0x8100CDAE (creation),
+// 0x81016CA0 and 0x81016EB6 (the camera and projection matrices), 0x81016482 (the transform).
+// Each flake is a sprite at the projected place, in the world view (the flake's object points at the scale and origin that
+// setScrScl and setScrOrgY write, 0x810DE4D8 and 0x810DFFAC), turned by its random angle. Its picture is interface texture
+// 245, variant 0 (a 16-pixel white dot), read in the birth code (0x810818D8 takes it from the texture-id table
+// 0x810DDF94 at index 0x3D4 / 4). The blending is the usual one (not read). The random generator is the port's own, so
+// the places differ from a console run, not their distribution.
 struct SnowObject : ScreenObject {
-    std::vector<SnowFlake> flakes;
-    double clock = 0.0;
-    double amount = -1, amount_target = -1, amount_rate = 0;  // setAmount(count, time): more or fewer flakes over time
-    int64_t state = 7;
+    struct Flake {
+        double p[3], v[3], size, angle;
+    };
+    std::vector<Flake> flakes;
+    struct Shown {
+        double x, y, scale, alpha, angle;  // the sprite's centre in the scripts' units, its scale, alpha and turn (units of pi)
+    };
+    std::vector<Shown> view;  // the flakes as they are drawn, rebuilt every step
+    ImagePtr dot;
+    int64_t d[4] = {10000, 8000, 1000, 8000};
+    double preset_size = 0.18;
+    double target = 0, ramp_from = 0, ramp_to = 0, ramp_left = 0, ramp_total = 0;  // setAmount
+    struct Tween {
+        double v = 0, from = 0, to = 0, left = 0, total = 0;
+        void set(double value, double time) {
+            from = v;
+            to = value;
+            left = total = time;
+            if (time <= 0) v = value;
+        }
+        void step(double dt) {
+            if (left <= 0) return;
+            left = std::max(0.0, left - dt);
+            v = left > 0 ? to - (to - from) * left / total : to;
+        }
+    };
+    Tween yaw, pitch, cam[3];
+    uint32_t rng = 7;
 
-    SnowObject(int64_t id, int64_t lay, int64_t count) {
+    SnowObject(int64_t id, int64_t lay, int64_t count, const int64_t dist[4], double size, ImagePtr picture) {
         uid = id;
+        dot = std::move(picture);
         layer = lay;
         rect[2] = rect[3] = 1;
-        int64_t state = 7;
-        auto unit = [&] {
-            state = (state * 1103515245 + 12345) & 0x7FFFFFFF;
-            return double(state) / 2147483648.0;
-        };
-        auto uniform = [&](double lo, double hi) { return lo + (hi - lo) * unit(); };
-        static const int sizes[5] = {1, 1, 2, 2, 3};
-        for (int64_t i = 0; i < std::max<int64_t>(1, count); ++i) {
-            SnowFlake f;
-            f.x = uniform(-340, 340);
-            f.y = uniform(-240, 240);
-            f.size = sizes[int(unit() * 5)];
-            f.speed = uniform(0.4, 1.2);
-            f.phase = uniform(0, 6.28);
-            flakes.push_back(f);
-        }
+        for (int i = 0; i < 4; ++i) d[i] = dist[i];
+        preset_size = size;
+        target = ramp_to = double(count);
+        while (int64_t(flakes.size()) < count) birth();  // the creator fills the target at once
     }
     std::unique_ptr<ScreenObject> clone() const override { return std::make_unique<SnowObject>(*this); }
-    void add_flake() {
-        auto unit = [&] {
-            state = (state * 1103515245 + 12345) & 0x7FFFFFFF;
-            return double(state) / 2147483648.0;
-        };
-        static const int sizes[5] = {1, 1, 2, 2, 3};
-        SnowFlake f;
-        f.x = -340 + 680 * unit();
-        f.y = -240 + 480 * unit();
-        f.size = sizes[int(unit() * 5)];
-        f.speed = 0.4 + 0.8 * unit();
-        f.phase = 6.28 * unit();
+    int64_t rand_() {  // 0 to 2^31 - 1, as the C library's would give
+        rng = rng * 1103515245u + 12345u;
+        return int64_t((rng >> 1) & 0x7FFFFFFF);
+    }
+    int64_t mod(int64_t n) { return n > 0 ? rand_() % n : 0; }
+    // FIDELITY: read 0x81096106 (docs/technical/d1-snow.md): the first fill spreads the flakes over the whole box, a flake
+    // born later to refill the target starts at the top of it (y = -d[1] / 100), so it falls the whole height.
+    void birth(bool at_top = false) {
+        Flake f;
+        f.p[0] = double(mod(d[0]) - d[0] / 2) / 100.0;
+        f.p[1] = at_top ? double(-d[1]) / 100.0 : double(mod(d[1]) - d[1]) / 100.0;
+        f.p[2] = (double(d[2]) + double(mod(d[3]))) / 100.0;
+        f.angle = double(mod(2000)) / 1000.0;
+        f.size = double(mod(50) + mod(50) + 100) * 0.12;
+        const double vy = f.size * preset_size * double(mod(30) - mod(30) + 100) / 1200.0;
+        f.v[1] = vy;
+        f.v[0] = vy * double(mod(100) - mod(100)) / 1000.0;
+        f.v[2] = vy * double(mod(100) - mod(100)) / 1000.0;
         flakes.push_back(f);
     }
     void set_amount(double count, double time) {
-        if (amount < 0) amount = double(flakes.size());
-        amount_target = std::max(0.0, count);
-        amount_rate = time > 0 ? (amount_target - amount) / time : 0;
-        if (time <= 0) amount = amount_target;
+        ramp_from = target;
+        ramp_to = std::max(0.0, count);
+        ramp_left = ramp_total = time;
+        if (time <= 0) target = ramp_to;
+    }
+    void turn(double a, double b, double time) {  // turnCam(yaw, pitch, mode, time), in degrees
+        yaw.set(a, time);
+        pitch.set(b, time);
+    }
+    void move(double x, double y, double z, double time) {
+        cam[0].set(x, time);
+        cam[1].set(y, time);
+        cam[2].set(z, time);
     }
     void step(double dt) override {
         ScreenObject::step(dt);
-        clock += dt;
-        if (amount_target >= 0 && amount != amount_target) {
-            amount += amount_rate * dt;
-            if ((amount_rate >= 0 && amount > amount_target) || (amount_rate < 0 && amount < amount_target)) amount = amount_target;
+        if (ramp_left > 0) {
+            ramp_left = std::max(0.0, ramp_left - dt);
+            target = ramp_left > 0 ? double(int64_t(ramp_to - (ramp_to - ramp_from) * ramp_left / ramp_total)) : ramp_to;
         }
-        if (amount >= 0) {
-            while (double(flakes.size()) < amount) add_flake();
-            while (double(flakes.size()) > amount + 0.5) flakes.pop_back();
-        }
-        for (auto& f : flakes) {
-            f.y += f.speed * dt * f.size * 0.5;
-            if (f.y > 240) f.y -= 480;
+        yaw.step(dt);
+        pitch.step(dt);
+        for (auto& c : cam) c.step(dt);
+        if (double(flakes.size()) < target && mod(4) == 0) birth(true);
+
+        // The camera: turned by pitch about x and yaw about y (the angles go in negated), as the engine builds its matrix.
+        const double rad = 3.14159265358979 / 180.0;
+        const double ca = std::cos(-pitch.v * rad), sa = std::sin(-pitch.v * rad), cb = std::cos(-yaw.v * rad), sb = std::sin(-yaw.v * rad);
+        const double fwd[3] = {-sb * ca, -sa, ca * cb}, up[3] = {-sb * sa, ca, cb * sa};
+        auto cross = [](const double* a, const double* b, double* o) {
+            o[0] = a[1] * b[2] - a[2] * b[1];
+            o[1] = a[2] * b[0] - a[0] * b[2];
+            o[2] = a[0] * b[1] - a[1] * b[0];
+        };
+        auto norm = [](double* a) {
+            const double n = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+            if (n > 0)
+                for (int i = 0; i < 3; ++i) a[i] /= n;
+        };
+        double ax[3], ay[3], az[3] = {fwd[0], fwd[1], fwd[2]};
+        cross(up, fwd, ax);
+        norm(ax);
+        norm(az);
+        cross(az, ax, ay);
+
+        view.clear();
+        for (size_t i = 0; i < flakes.size();) {
+            Flake& f = flakes[i];
+            for (int k = 0; k < 3; ++k) f.p[k] += f.v[k] * dt;
+            if (f.p[1] > 0) {  // reached the ground
+                flakes[i] = flakes.back();
+                flakes.pop_back();
+                continue;
+            }
+            ++i;
+            const double rel[3] = {f.p[0] - cam[0].v, f.p[1] - cam[1].v, f.p[2] - cam[2].v};
+            const double depth = az[0] * rel[0] + az[1] * rel[1] + az[2] * rel[2];
+            if (depth <= 0) continue;
+            const double sx = 512.0 * (ax[0] * rel[0] + ax[1] * rel[1] + ax[2] * rel[2]) / depth;
+            const double sy = 512.0 * (ay[0] * rel[0] + ay[1] * rel[1] + ay[2] * rel[2]) / depth;
+            const double zs = 65533.0000152 / depth + 1.0 / 65535.0;  // the depth as the engine's clip space keeps it
+            if (std::fabs(sx) > 400 || std::fabs(sy) > 300 || zs > 24000) continue;
+            const double scale = std::max(f.size / depth, 0.1875);
+            double a = zs > 20000 ? (24000 - zs) / 1000 : (zs < 3000 ? zs / 3000 : 1.0);
+            if (f.p[1] > -2) a *= -0.5 * f.p[1];  // fades out in the last two units above the ground
+            a = std::min(a, 1.0);
+            if (a <= 0) continue;
+            view.push_back({sx * 0.75, sy * 0.75, scale, a, f.angle});
         }
     }
-    void fill(DrawItem& item) const override {
-        ScreenObject::fill(item);
-        item.snow = true;
-        item.flakes = std::make_shared<std::vector<SnowFlake>>(flakes);
-        item.clock = clock;
+    void fill_all(std::vector<DrawItem>& out) const override {
+        DrawItem base;
+        fill(base);
+        if (base.alpha <= 0 || !dot) return;
+        for (const Shown& f : view) {
+            DrawItem item = base;
+            item.image = dot;
+            item.rect[0] = item.rect[1] = 0;
+            item.rect[2] = dot->w;
+            item.rect[3] = dot->h;
+            item.centre[0] = f.x;
+            item.centre[1] = f.y;
+            item.scale[0] = item.scale[1] = f.scale;
+            item.alpha = base.alpha * f.alpha;
+            item.angle = f.angle;
+            item.follow = 1.0;
+            item.snow = true;
+            out.push_back(std::move(item));
+        }
     }
 };
 
@@ -630,25 +667,20 @@ struct NaviObject : ScreenObject {
     }
 };
 
-// K2R_CObjBalloon (read from 0x18F5F8 and the parts' 0x19B0D8, 0x1A59B8): the topic bubble of the conversation game.
-// Six parts on a hexagon, at (+-13.5, -31.5), (+-21, 0), (+-13.5, 31.5); each part is `maru/maru128` drawn in the
-// category's colour (a table of twelve at 0x28A850: 10 is the grey of a hidden topic, 11 black) at the full offset,
-// and again in white at the offset divided by (1.5, 1.33), so the colour shows as a rim around a white body. The
-// `?` (`maru/hatena`, 32x48) sits on top when the bubble hides its topic. APPROXIMATION: the engine also draws a
-// black layer at (1.04/1.5, 1.18/1.33) of the offset and makes every part wobble from random phases; neither is
-// modelled, and the discs' size is fitted to PCSX2's picture (body 128x192 at 0.75 from the constants), not read.
+// The topic bubble of the conversation game (Balloon). On the Vita it is two sprites of interface texture 215, the rim lit by the
+// object's light and a white body, with the `?` (variant 2) when the topic is hidden; the code is in `fill`. (The PS2 drew six
+// parts of `maru/maru128` in two sizes, objects.md; the Vita pictures hold that look, so nothing is modelled of it.)
 struct BalloonObject : ScreenObject {
     ImagePtr disc, mark, inner;
     double colour[3] = {1, 1, 1};
     bool show_mark = false;
-    bool vita = false;
 
     std::unique_ptr<ScreenObject> clone() const override { return std::make_unique<BalloonObject>(*this); }
     void fill_all(std::vector<DrawItem>& out) const override {
         DrawItem base;
         fill(base);
         if (base.alpha <= 0 || !disc) return;
-        if (vita) {
+        {
             // FIDELITY: read 0x8100B20E (Balloon's constructor; the part class K2R_CObjBalParts, vtable 0x810C1818) and
             // 0x8108FE64 (its draw), 0x8108FF00 (its step). Two sprites of interface texture 215 at the object's own
             // transform, the same size: variant 0 lit by the object's light (the rim's colour), then variant 1, or 2 (the
@@ -671,25 +703,6 @@ struct BalloonObject : ScreenObject {
             layer(show_mark && mark ? mark : inner ? inner : disc, 1.0, white_light, false);
             return;
         }
-        static const double offsets[6][2] = {{-13.5, -31.5}, {13.5, -31.5}, {-21, 0}, {21, 0}, {-13.5, 31.5}, {13.5, 31.5}};
-        const double disc_scale = 54.0 / 128.0;
-        auto part = [&](const ImagePtr& img, double ox, double oy, double scale, const double rgb[3]) {
-            DrawItem item = base;
-            item.image = img;
-            item.rect[0] = item.rect[1] = 0;
-            item.rect[2] = img->w;
-            item.rect[3] = img->h;
-            item.centre[0] += ox * base.scale[0];
-            item.centre[1] += oy * base.scale[1];
-            item.scale[0] *= scale;
-            item.scale[1] *= scale;
-            for (int c = 0; c < 3; ++c) item.light[c] = rgb[c] * base.light[c];
-            out.push_back(std::move(item));
-        };
-        static const double white[3] = {1, 1, 1};
-        for (auto& o : offsets) part(disc, o[0], o[1], disc_scale, colour);
-        for (auto& o : offsets) part(disc, o[0] / 1.5, o[1] / 1.33, disc_scale, white);
-        if (show_mark && mark) part(mark, 0, 0, 3.0 * 0.75, white);
     }
 };
 
@@ -724,9 +737,9 @@ struct ActorObject : ScreenObject {
         layer = lay;
         // FIDELITY: read 0x8108D382: on the Vita a character points at the world view's origin itself (follow 1). The
         // PS2 value is the old fit (F4-53), kept for the PS2 and for extra pictures (set_extra), not traced on Vita.
-        follow = g->vita ? 1.0 : 0.5;
-        rect[2] = CANVAS_W * (g->vita ? 2 : 1);  // the Vita's pictures have twice the resolution
-        rect[3] = CANVAS_H * (g->vita ? 2 : 1);
+        follow = 1.0;
+        rect[2] = CANVAS_W * 2;  // the Vita's pictures have twice the resolution
+        rect[3] = CANVAS_H * 2;
     }
     std::unique_ptr<ScreenObject> clone() const override { return std::make_unique<ActorObject>(*this); }
 
@@ -735,7 +748,7 @@ struct ActorObject : ScreenObject {
         int mouth = 3 * mouth_face + (lip_level >= 0 ? 2 - lip_level : FRAMES[mouth_phase]);
         auto quantise = [](double v) { return std::max(0, std::min(16, int(v * 16 + 0.5))); };
         image = gfx->actor_canvas(has_body ? body : std::string(), has_face ? face : std::string(), eye, mouth,
-                                  gfx->vita ? 0.0 : offset[0], gfx->vita ? 0.0 : offset[1], quantise(blush), quantise(sweat),
+                                  0.0, 0.0, quantise(blush), quantise(sweat),
                                   int(std::nearbyint(sweat_drop)));
     }
     void set_picture(int64_t character, int64_t cloth, int64_t pose, double ox, double oy) {
@@ -750,22 +763,16 @@ struct ActorObject : ScreenObject {
     }
     void set_extra(int64_t size, int64_t picture, int64_t variant) {
         char buf[64];
-        std::snprintf(buf, sizeof buf, "%s/x%s_%c%c", gfx->vita ? "body" : "stand", size ? "s" : "l", char(0x41 + picture),
-                      char(0x61 + variant));
+        std::snprintf(buf, sizeof buf, "body/x%s_%c%c", size ? "s" : "l", char(0x41 + picture), char(0x61 + variant));
         body = buf;
         has_body = true;
         face.clear();
         has_face = false;
         name = "extra " + body;
         offset[0] = offset[1] = 0.0;
-        shift[0] = EXTRA_SHIFT[0];
-        shift[1] = EXTRA_SHIFT[1];
+        shift[0] = shift[1] = 0.0;
         extra = true;
-        follow = 0.5;
-        if (gfx->vita) {
-            shift[0] = shift[1] = 0.0;
-            follow = 1.0;  // FIDELITY: read 0x81081D2A: the extra's body points at the world view, unconditionally
-        }
+        follow = 1.0;  // FIDELITY: read 0x81081D2A: the extra's body points at the world view, unconditionally
         refresh();
     }
     void position(double out[2]) const {
@@ -781,7 +788,7 @@ struct ActorObject : ScreenObject {
         centre[1] = PIVOT[1] + (p[1] - PIVOT[1]) * z[1];
         scale[0] = z[0];
         scale[1] = z[1];
-        if (gfx->vita && extra) {
+        if (extra) {
             // FIDELITY: read 0x8108BB0C (ExtraPicture's step): X = P.x * 0.5, Y = P.y * 0.5 - 8 (base 0x810AD928) plus
             // ofsX/ofsY, scale S = Z * (1.5, 1.6071428) (= 1.5 * 480/448), about (0, -22.5) (0x810AD930), as the
             // characters. In the port's canvas that is (0.75, 45/56) of the zoom; the album zooms its thumbnail sheet
@@ -791,7 +798,7 @@ struct ActorObject : ScreenObject {
             auto P = pos.value();
             centre[0] = (P[0] * 0.5 + offset[0]) * 1.5 * z[0];
             centre[1] = -22.5 + (P[1] * 0.5 - 8.0 + offset[1] + 22.5) * (1.5 * 480.0 / 448.0) * z[1];
-        } else if (gfx->vita) {
+        } else {
             // FIDELITY: read 0x8108E1DA..0x8108E530 (ActorPicture's step, screen path) and 0x810101F0 (the body's draw).
             // The Vita runs the PS2's Actor scripts unchanged and maps their position P and zoom Z itself:
             // X = P.x * 0.75 / 1.25, Y = P.y * 0.75 * 1.05 / 1.25 + 48 (0x810AD940), scale S = Z * (1.215, 1.215 * 1.05),
@@ -808,6 +815,19 @@ struct ActorObject : ScreenObject {
             scale[0] = sx * 2.0 / 3.2;
             scale[1] = sy * 2.0 / 3.2;
         }
+    }
+    // FIDELITY: read 0x8108DC98..0x8108DD60 and 0x8108E5E0 (ActorPicture's step with a cut-in target, vita-executable.md
+    // "Cut-in geometry"); measured against Vita3K 2026-10-29 (n0fre___18A, the mahjong's first cut-ins). The window W
+    // (units) and its zoom Tz replace the world view: S = (0.9072, 0.95256) * Z * Tz, X0 = 0.6 * P.x + ofsX,
+    // Y0 = 0.63 * P.y + 48 + ofsY + 3, centre = W + X0 * S, with no -22.5 pivot.
+    void cut_in_placement(const double W[2], const double Tz[2], double centre[2], double scale[2]) const {
+        auto P = pos.value();
+        auto z = zoom.value();
+        double sx = 0.9072 * z[0] * Tz[0], sy = 0.95256 * z[1] * Tz[1];
+        centre[0] = W[0] + (P[0] * 0.6 + offset[0]) * sx;
+        centre[1] = W[1] + (P[1] * 0.63 + 48.0 + offset[1] + 3.0) * sy;
+        scale[0] = sx * 2.0 / 3.2;
+        scale[1] = sy * 2.0 / 3.2;
     }
     static void steps_for(int mode, int phase, bool is_eye, int pending, int& out_phase, int& out_steps) {
         auto py_mod = [](int a, int m) { return ((a % m) + m) % m; };
@@ -882,12 +902,16 @@ struct ActorObject : ScreenObject {
             sweat_drop = 0.0;
             return;
         }
+        // FIDELITY: read 0x8108CEDC (d1-face-animation.md, two readings): turning the sweat on with a time restarts the
+        // fade from 0, and turning it off with a time takes the drop away at once.
+        if (on) sweat = 0.0;
         sweat_left = time;
         sweat_accel = (target - sweat) / (time * time);
         if (on) {
             sweat_drop = SWEAT_FALL;
             sweat_drop_accel = SWEAT_FALL / (time * time);
         } else {
+            sweat_drop = 0.0;
             sweat_drop_accel = 0.0;
         }
     }
@@ -916,8 +940,8 @@ struct ActorObject : ScreenObject {
                 changed = true;
             }
         }
-        int level = lip_sync && gfx->mouth_level && character >= 0 ? gfx->mouth_level(int(character)) : -1;
-        if (gfx->vita) {
+        int level = lip_sync && gfx->mouth_level && character >= 0 ? std::min(gfx->mouth_level(int(character)), 2) : -1;  // a level over 2 would index the frames out of range (review 2026-10-30)
+        {
             // FIDELITY: read 0x8108E6xx..0x8108E7A2 (ActorPicture's step, the mouth): while the voice drives the mouth,
             // pending setMouth steps are taken at once and the frame shown is 2 - level; once it stops, if the phase's
             // frame is not the last frame shown, the phase becomes that frame and setMouth(the phase's old frame,
@@ -931,7 +955,7 @@ struct ActorObject : ScreenObject {
                 if (FRAMES[mouth_phase] != mouth_frame) {
                     int back = FRAMES[mouth_phase];
                     mouth_phase = mouth_frame;
-                    set_mouth(back, double(unsigned(std::max(mouth_time, 0.0)) & 0xFFFF));
+                    set_mouth(back, double(unsigned(std::min(std::max(mouth_time, 0.0), 65535.0)) & 0xFFFF));
                     changed = true;
                 }
             } else if (mouth_timer < mouth_time) {
@@ -940,15 +964,6 @@ struct ActorObject : ScreenObject {
                 mouth_timer -= mouth_time;
                 mouth_phase = (mouth_phase + 1) & 3;
                 mouth_frame = FRAMES[mouth_phase];
-                --mouth_steps;
-                changed = true;
-            }
-        } else if (mouth_steps) {
-            if (mouth_timer < mouth_time) {
-                mouth_timer += dt;
-            } else {
-                mouth_timer -= mouth_time;
-                mouth_phase = (mouth_phase + 1) & 3;
                 --mouth_steps;
                 changed = true;
             }
@@ -983,6 +998,7 @@ struct EventPicExObject : ScreenObject {
     bool lip_sync = true;
     int64_t character = -1;
     int lip_level = -1;
+    int mouth_frame = 2;  // Vita: the mouth frame last shown (+0x278), the lip-synced one included
 
     std::unique_ptr<ScreenObject> clone() const override { return std::make_unique<EventPicExObject>(*this); }
     void set_mouth(int mode, double time) {
@@ -998,16 +1014,30 @@ struct EventPicExObject : ScreenObject {
     void step(double dt) override {
         if (paused) return;
         ScreenObject::step(dt);
-        if (mouth_steps) {
-            if (mouth_timer < mouth_time) {
-                mouth_timer += dt;
-            } else {
-                mouth_timer -= mouth_time;
-                mouth_phase = (mouth_phase + 1) & 3;
-                --mouth_steps;
+        // FIDELITY: read 0x8108A65E..0x8108A768 (EventPicture's step, the mouth; d1-leftovers.md 2.3, two readings):
+        // the same path as ActorObject's mouth. While the voice drives it, pending steps are folded at once and the
+        // frame shown is 2 - level; afterwards the mouth animates from the last frame shown back to the phase's frame.
+        int level = lip_sync && gfx && gfx->mouth_level && character >= 0 ? std::min(gfx->mouth_level(int(character)), 2) : -1;  // a level over 2 would index the frames out of range (review 2026-10-30)
+        if (level >= 0) {
+            mouth_phase = (mouth_phase + mouth_steps) & 3;
+            mouth_steps = 0;
+            mouth_timer = 0.0;
+            mouth_frame = 2 - level;
+        } else if (!mouth_steps) {
+            if (ActorObject::FRAMES[mouth_phase] != mouth_frame) {
+                int back = ActorObject::FRAMES[mouth_phase];
+                mouth_phase = mouth_frame;
+                set_mouth(back, double(unsigned(std::min(std::max(mouth_time, 0.0), 65535.0)) & 0xFFFF));
             }
+        } else if (mouth_timer < mouth_time) {
+            mouth_timer += dt;
+        } else {
+            mouth_timer -= mouth_time;
+            mouth_phase = (mouth_phase + 1) & 3;
+            mouth_frame = ActorObject::FRAMES[mouth_phase];
+            --mouth_steps;
         }
-        lip_level = lip_sync && gfx && gfx->mouth_level && character >= 0 ? gfx->mouth_level(int(character)) : -1;
+        lip_level = level;
     }
     void fill_all(std::vector<DrawItem>& out) const override {
         DrawItem base;
@@ -1015,8 +1045,7 @@ struct EventPicExObject : ScreenObject {
         if (base.alpha <= 0) return;
         out.push_back(base);
         if (!sheet || frames.size() < 3) return;
-        static const int FRAMES[4] = {0, 1, 2, 1};
-        const auto& r = frames[size_t(lip_level >= 0 ? 2 - lip_level : FRAMES[mouth_phase & 3])];
+        const auto& r = frames[size_t(lip_level >= 0 ? 2 - lip_level : ActorObject::FRAMES[mouth_phase & 3])];
         DrawItem patch = base;
         patch.image = sheet;
         patch.rect[0] = r[2];
@@ -1029,75 +1058,67 @@ struct EventPicExObject : ScreenObject {
     }
 };
 
-// K2R_CObjCutInWindow (factory 0x1090C0, constructor 0x18C2E8): the window of a mahjong cut-in. The engine builds
-// three children: the frame `mahjong/cut_frame` (record 320, 224x224) and two layers of the background pattern
-// `maru/cut_tex%1d` (record 319, 64x64), chosen by setTex(319, n) and coloured by setColor(r1, g1, b1, r2, g2, b2);
-// a character whose setDrawTarget names the window is drawn inside it. APPROXIMATION (fitted to PCSX2's picture,
-// the engine's render target is not modelled): the background is the pattern's grey mixing the two colours, the
-// character is drawn as on the screen, enlarged by ZOOM about the screen point VIEW, which lands on the window's
-// centre, and cut to the inside of the frame.
+// K2R_CObjCutInWindow (Vita factory 0x8100AE44, vtable 0x810C1720; PS2 factory 0x1090C0, constructor 0x18C2E8): the
+// window of a mahjong cut-in. The engine builds three children: the frame `mahjong/cut_frame` (texture 321) and two layers
+// of the background pattern `maru/cut_tex%1d` (texture 322); setTex picks the first layer's variant and
+// setColor(r1, g1, b1, r2, g2, b2) colours the two layers. FIDELITY: read 0x8108F194 and 0x8100AE44: the window is 268
+// pixels at scale 1 (the constant 268.0): the frame is drawn 1:1 and the 128-pixel pattern is stretched to 268 (the PS2's
+// 224 and 200 were its own sizes). A character whose setDrawTarget names the window is drawn inside it (0x8108D300: the
+// view of scale 1.0 and the target's origin instead of the world view): ActorObject::cut_in_placement, read and
+// checked against Vita3K 2026-10-29 (fidelity.md, item 2). The two pattern layers are two stretched sprites (0x8108FA40):
+// the base (texture 322 variant 0, colour 2) and over it the variant setTex chose (colour 1); the order is a hypothesis
+// that agrees with the Vita3K capture. The clip is the frame's whole quad (0x8108FDD4, a stencil); that it keeps the
+// inside is a hypothesis (Vita3K draws the body outside the window, probably its own stencil fault).
 struct CutInWindowObject : ScreenObject {
     Graphics* gfx = nullptr;
-    ImagePtr frame;
+    ImagePtr frame, base_pattern;
     double c1[3] = {1, 1, 1}, c2[3] = {1, 1, 1};
-    mutable ImagePtr mixed;
-    mutable const Image* mixed_from = nullptr;
-    mutable double mixed_colours[6] = {-1, -1, -1, -1, -1, -1};
-    static constexpr double INNER = 200.0;
-    static constexpr double VIEW[2] = {24.0, -17.0};
-    static constexpr double ZOOM = 1.25;
+    static constexpr double SIZE = 268.0;   // FIDELITY: read 0x8108F194 (the frame's size and the window's at scale 1)
 
     std::unique_ptr<ScreenObject> clone() const override { return std::make_unique<CutInWindowObject>(*this); }
-    ImagePtr background() const {
-        if (!image) return nullptr;
-        double cs[6] = {c1[0], c1[1], c1[2], c2[0], c2[1], c2[2]};
-        if (mixed && mixed_from == image.get() && std::equal(cs, cs + 6, mixed_colours)) return mixed;
-        auto out = std::make_shared<Image>();
-        out->w = image->w;
-        out->h = image->h;
-        out->px.resize(image->px.size());
-        for (size_t i = 0; i + 3 < image->px.size(); i += 4) {
-            double t = image->px[i] / 255.0;  // the pattern is grey: light parts take the first colour
-            for (int c = 0; c < 3; ++c)
-                out->px[i + size_t(c)] = uint8_t(std::min(255.0, 255.0 * (c2[c] + (c1[c] - c2[c]) * t)));
-            out->px[i + 3] = 128;  // opaque (0x80)
-        }
-        mixed = out;
-        mixed_from = image.get();
-        std::copy(cs, cs + 6, mixed_colours);
-        return mixed;
-    }
     void fill_all(std::vector<DrawItem>& out) const override {
         DrawItem base;
         fill(base);
         if (base.alpha <= 0) return;
-        double half = INNER * 0.5;
+        // The clip is in units around the screen centre (the renderer scales it by VIEW_UNIT); SIZE is in pixels.
+        double half = SIZE * 0.5 / VIEW_UNIT;
         double clip[4] = {SCREEN_W / 2.0 + base.centre[0] - half * base.scale[0],
                           SCREEN_H / 2.0 + base.centre[1] - half * base.scale[1],
                           SCREEN_W / 2.0 + base.centre[0] + half * base.scale[0],
                           SCREEN_H / 2.0 + base.centre[1] + half * base.scale[1]};
-        if (ImagePtr bg = background()) {
+        auto pattern = [&](const ImagePtr& img, const double* colour) {
+            if (!img) return;
             DrawItem item = base;
-            item.image = bg;
+            item.image = img;
             item.rect[0] = item.rect[1] = 0;
-            item.rect[2] = bg->w;
-            item.rect[3] = bg->h;
-            item.scale[0] *= INNER / bg->w;
-            item.scale[1] *= INNER / bg->h;
-            item.light[0] = item.light[1] = item.light[2] = 1.0;
+            item.rect[2] = img->w;
+            item.rect[3] = img->h;
+            item.scale[0] *= SIZE / img->w;
+            item.scale[1] *= SIZE / img->h;
+            for (int c = 0; c < 3; ++c) item.light[c] = colour[c];
             out.push_back(std::move(item));
-        }
+        };
+        pattern(base_pattern, c2);
+        pattern(image, c1);
         if (gfx)
             for (const auto& [id, obj] : gfx->objects) {
                 auto* actor = dynamic_cast<const ActorObject*>(obj.get());
                 if (!actor || actor->draw_target != uid) continue;
                 std::vector<DrawItem> drawn;
                 actor->fill_all(drawn);
+                // The parts follow the body with the same scale in both views, so the screen drawing is moved and
+                // scaled as a whole from the screen placement to the window's.
+                double sc[2], ss[2], cc[2], cs[2];
+                actor->placement(cs, ss);
+                actor->cut_in_placement(base.centre, base.scale, cc, sc);
                 for (auto& item : drawn) {
-                    item.centre[0] = base.centre[0] + (item.centre[0] - VIEW[0]) * ZOOM;
-                    item.centre[1] = base.centre[1] + (item.centre[1] - VIEW[1]) * ZOOM;
-                    item.scale[0] *= ZOOM;
-                    item.scale[1] *= ZOOM;
+                    for (int i = 0; i < 2; ++i) {
+                        double k = ss[i] != 0.0 ? sc[i] / ss[i] : 0.0;
+                        item.centre[i] = cc[i] + (item.centre[i] - cs[i]) * k;
+                        item.scale[i] *= k;
+                    }
+                    item.follow = base.follow;
+                    item.ui = base.ui;
                     item.alpha *= base.alpha;
                     item.layer = layer;
                     item.order = order;
@@ -1112,13 +1133,13 @@ struct CutInWindowObject : ScreenObject {
             item.rect[0] = item.rect[1] = 0;
             item.rect[2] = frame->w;
             item.rect[3] = frame->h;
-            item.scale[0] *= (INNER + 24.0) / frame->w;
-            item.scale[1] *= (INNER + 24.0) / frame->h;
+            item.scale[0] *= SIZE / frame->w;
+            item.scale[1] *= SIZE / frame->h;
             out.push_back(std::move(item));
         }
     }
 };
-constexpr double CutInWindowObject::VIEW[2];
+constexpr double CutInWindowObject::SIZE;
 
 constexpr double ActorObject::PIVOT[2];
 constexpr double ActorObject::ACTOR_SHIFT[2];
@@ -1131,64 +1152,24 @@ constexpr int ActorObject::FRAMES[4];
 // Graphics
 // ---------------------------------------------------------------------------------------------
 
-bool Graphics::Archive::read(uint32_t hash, std::string& out) const {
-    auto it = index.find(hash);
-    if (it == index.end()) return false;
-    std::ifstream f(path, std::ios::binary);
-    f.seekg(it->second.first);
-    out.resize(it->second.second);
-    f.read(out.data(), std::streamsize(out.size()));
-    return true;
-}
-
 Graphics::Graphics(VM& v) : vm(v) {
-    std::string root = vm.root + "/extracted";
     graph_cpk_path = amg::data_file(vm.root, "graph/GRAPH.CPK");
-    vita = std::filesystem::exists(graph_cpk_path);
-    use_screen_of(vm.root);
-    if (vita) {
-        graph_cpk = cpk_read_index(graph_cpk_path);
-        exe = amg::vita_exe(vm.root);
-        return;
+    read_screen_settings();
+    graph_cpk = cpk_read_index(graph_cpk_path);
+    exe = amg::vita_exe(vm.root);
+    // The two font sheets are read and converted the first time a character is drawn: a 25 to 30 ms stall in the middle
+    // of the first scene with text. Done here, while the game is still loading.
+    try {
+        glyph(0, 0, 0x8140);
+        glyph(1, 0, 0x8140);
+    } catch (const std::exception&) {
     }
-    for (const char* n : {"GRAPH0.ARC", "GRAPH1.ARC", "GRAPH2.ARC"}) {
-        Archive a;
-        a.path = root + "/GRAPH/" + n;
-        std::ifstream f(a.path, std::ios::binary);
-        if (!f) throw std::runtime_error("cannot open " + a.path);
-        char head[8];
-        f.read(head, 8);
-        uint32_t count = le32(std::string(head, 8), 0);
-        f.seekg(8 + 4 * std::streamoff(count));
-        std::string table(16 * size_t(count), '\0');
-        f.read(table.data(), std::streamsize(table.size()));
-        for (uint32_t i = 0; i < count; ++i)
-            a.index[le32(table, 16 * i + 4)] = {le32(table, 16 * i + 8), le32(table, 16 * i + 12)};
-        archives.push_back(std::move(a));
-    }
-    clt = amg::read_file(root + "/GRAPH/GRAPH0.CLT");
-    exe = amg::read_file(root + "/SLPS_259.87");
 }
 
 std::string Graphics::exe_string(uint32_t address) const {
-    size_t start = vita ? amg::vita_va_to_off(exe, address, "string") : size_t(address - VRAM + FILE_OFFSET);
+    size_t start = amg::vita_va_to_off(exe, address, "string");
     size_t end = exe.find('\0', start);
     return exe.substr(start, end - start);
-}
-
-Graphics::Record Graphics::record(int number) const {
-    if (vita) return Record();  // no named records on Vita: ui_image() resolves the id instead
-    size_t offset = size_t(TEXTURE_TABLE + TEXTURE_RECORD * uint32_t(number) - VRAM + FILE_OFFSET);
-    uint32_t name_ptr = le32(exe, offset);
-    Record r;
-    r.variant = int(le32(exe, offset + 4));
-    for (int i = 0; i < 4; ++i) r.rect[i] = double(lef(exe, offset + 8 + 4 * size_t(i)));
-    r.palette = int(le32(exe, offset + 28));
-    if (name_ptr) {
-        r.has_name = true;
-        r.name = exe_string(name_ptr);
-    }
-    return r;
 }
 
 // Vita interface pictures (docs/technical/vita-cpk-format.md, F4-43). The eboot keeps, per texture
@@ -1198,7 +1179,7 @@ Graphics::Record Graphics::record(int number) const {
 int Graphics::ui_entry(int64_t texture, int64_t variant) const {
     constexpr uint32_t TEXTURES = 0x810ddf94, TEXTURE_COUNT = 337;
     constexpr uint32_t RECORDS = 0x810ac158, RECORD_COUNT = 762;
-    if (!vita || texture < 0 || texture >= TEXTURE_COUNT) return 0;
+    if (texture < 0 || texture >= TEXTURE_COUNT) return 0;
     auto word = [this](uint32_t va) { return le32(exe, amg::vita_va_to_off(exe, va, "texture table")); };
     uint32_t variants = word(TEXTURES + 4 * uint32_t(texture));
     auto record_at = [&](int64_t v) -> uint32_t {
@@ -1223,16 +1204,15 @@ const uint8_t* Graphics::ui_pixels(int entry, uint32_t& w, uint32_t& h, uint32_t
     w = word(SIZES + 16 * uint32_t(entry) + 4);
     h = word(SIZES + 16 * uint32_t(entry) + 8);
     pitch = word(SIZES + 16 * uint32_t(entry) + 12);
-    if (w == 0 || h == 0 || pitch < w || size_t(start) + 1024 + size_t(pitch) * h > sysgraph.size()) return nullptr;
+    if (w == 0 || h == 0 || w > 4096 || h > 4096 || pitch < w || uint64_t(start) + 1024 + uint64_t(pitch) * h > sysgraph.size()) return nullptr;  // 64-bit sums: garbage sizes must not wrap on x86
     return reinterpret_cast<const uint8_t*>(sysgraph.data()) + start;  // palette, then the indices
 }
 
 // Read from the Vita engine's own code (docs/technical/vita-cpk-format.md, F4-43): the node icons
 // (kind + 0x4F/0x56, marks 0x5E/0x5F: PS2 - 3), the flags, clock and node extras (0xA4 + low, 0xA8,
 // clock 0xA9..0xAB, 0xAB + extra: PS2 - 6), the light ball (202), the map (194). The cut-in's frame
-// (321) and texture (322) were matched by picture, not by code (hypothesis).
+// (321) and texture (322) are read from the factory 0x8100AE44 (movw #0x141, #0x142).
 int64_t Graphics::engine_tex(int64_t ps2) const {
-    if (!vita) return ps2;
     if (ps2 >= 0x52 && ps2 <= 0x62) return ps2 - 3;
     if (ps2 >= 0xAA && ps2 <= 0xB4) return ps2 - 6;
     switch (ps2) {
@@ -1247,10 +1227,6 @@ int64_t Graphics::engine_tex(int64_t ps2) const {
 // A word of one of the PS2 executable's constant tables the port reads; on Vita, the same table in
 // eboot.bin (found byte for byte, or for the node tables with the Vita's own texture ids).
 uint32_t Graphics::exe_word(uint32_t addr) const {
-    if (!vita) {
-        size_t at = size_t(addr) - VRAM + FILE_OFFSET;
-        return at + 4 <= exe.size() ? le32(exe, at) : 0;
-    }
     static const struct { uint32_t ps2, vita, size; } tables[] = {
         {0x28B398, 0x810ADEA4, 56},     // clock: value per time of day
         {0x28A8D8, 0x810AD964, 96},     // clock: front face opacity per hour
@@ -1265,7 +1241,62 @@ uint32_t Graphics::exe_word(uint32_t addr) const {
     return 0;
 }
 
+// A port-made picture (F5-11): the brush stroke of one of the main menu's entries (interface texture 42) with its
+// lettering painted out, so that the port's own entry can carry its label in the game's font on the game's stroke. Asked
+// for as variant 1000 + the entry's own variant. The lettering is white with a dark outline; inside the stroke, pixels
+// like those are replaced row by row by the stroke's colour, interpolated between the nearest pixels left and right.
+ImagePtr Graphics::blank_stroke(int64_t texture, int64_t variant) {
+    const std::string key = "blank#" + std::to_string(texture) + ":" + std::to_string(variant);
+    auto it = images.find(key);
+    if (it != images.end()) return it->second;
+    ImagePtr base = ui_image(texture, variant);
+    if (!base) return nullptr;
+    auto img = std::make_shared<Image>(*base);
+    const int w = img->w, h = img->h;
+    auto px = [&](int x, int y) { return &img->px[(size_t(y) * size_t(w) + size_t(x)) * 4]; };
+    auto solid = [&](int x, int y) { return x >= 0 && y >= 0 && x < w && y < h && px(x, y)[3] >= 120; };
+    // The white of the letters, inside the stroke; then their outline: darker pixels at most 3 pixels from that white (the
+    // stroke's own dark rim is further from any letter and stays).
+    std::vector<uint8_t> white(size_t(w) * size_t(h), 0);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            if (!solid(x, y) || !solid(x - 6, y) || !solid(x + 6, y) || !solid(x, y - 3) || !solid(x, y + 3)) continue;
+            const uint8_t* p = px(x, y);
+            if (std::min({p[0], p[1], p[2]}) > 150) white[size_t(y) * size_t(w) + size_t(x)] = 1;
+        }
+    std::vector<uint8_t> grown(white);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            if (!white[size_t(y) * size_t(w) + size_t(x)]) continue;
+            for (int dy = -3; dy <= 3; ++dy)
+                for (int dx = -3; dx <= 3; ++dx) {
+                    const int u = x + dx, v = y + dy;
+                    if (!solid(u, v)) continue;
+                    const uint8_t* p = px(u, v);
+                    if ((p[0] * 3 + p[1] * 6 + p[2]) / 10 < 110 || (std::abs(dx) <= 1 && std::abs(dy) <= 1))
+                        grown[size_t(v) * size_t(w) + size_t(u)] = 1;
+                }
+        }
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            if (!grown[size_t(y) * size_t(w) + size_t(x)]) continue;
+            int l = x, r = x;
+            while (l >= 0 && grown[size_t(y) * size_t(w) + size_t(l)]) --l;
+            while (r < w && grown[size_t(y) * size_t(w) + size_t(r)]) ++r;
+            const bool has_l = l >= 0 && solid(l, y), has_r = r < w && solid(r, y);
+            if (!has_l && !has_r) continue;
+            const uint8_t* a = has_l ? px(l, y) : px(r, y);
+            const uint8_t* b = has_r ? px(r, y) : px(l, y);
+            const double t = has_l && has_r ? double(x - l) / double(r - l) : 0.0;
+            uint8_t* d = px(x, y);
+            for (int c = 0; c < 3; ++c) d[c] = uint8_t(a[c] + (b[c] - a[c]) * t + 0.5);
+        }
+    images[key] = img;
+    return img;
+}
+
 ImagePtr Graphics::ui_image(int64_t texture, int64_t variant) {
+    if (variant >= 1000) return blank_stroke(texture, variant - 1000);
     // The button glyphs of the interface (textures 15 to 19, 23 and 24, variant 0) come out marked with a slot.
     int slot = 0;
     {
@@ -1334,28 +1365,18 @@ ImagePtr Graphics::ui_image(int64_t texture, int64_t variant) {
 }
 
 bool Graphics::read_file(const std::string& name, std::string& out) const {
-    if (vita) return cpk_read(graph_cpk_path, graph_cpk, name, out);
-    uint32_t h = name_hash(name);
-    for (const auto& a : archives)
-        if (a.read(h, out)) return true;
-    return false;
+    return cpk_read(graph_cpk_path, graph_cpk, name, out);
 }
 
 static ImagePtr load_picture(const Graphics& g, const std::string& name, int palette) {
-    if (g.vita) {
-        std::string ext;
-        int width;
-        bool has_alpha;
-        if (!vita_gxt_layout(name, ext, width, has_alpha)) return nullptr;  // system/: not identified (F4-39)
-        std::string data;
-        if (!g.read_file(name + ext, data)) return nullptr;
-        return decode_gxt(data, width, has_alpha);
-    }
+    (void)palette;
+    std::string ext;
+    int width;
+    bool has_alpha;
+    if (!vita_gxt_layout(name, ext, width, has_alpha)) return nullptr;  // system/: not identified (F4-39)
     std::string data;
-    if (!g.read_file(name + ".tm2", data)) return nullptr;
-    size_t from = size_t(palette) * 1024, len = 1024;
-    std::string pal = from < g.clt.size() ? g.clt.substr(from, len) : std::string();
-    return decode_image(data, pal);
+    if (!g.read_file(name + ext, data)) return nullptr;
+    return decode_gxt(data, width, has_alpha);
 }
 
 ImagePtr Graphics::image_named(const std::string& name, int palette) {
@@ -1363,29 +1384,55 @@ ImagePtr Graphics::image_named(const std::string& name, int palette) {
     auto it = images.find(key);
     if (it != images.end()) return it->second;
     ImagePtr img;
+    const auto began = std::chrono::steady_clock::now();
     auto waiting = pending.find(key);
-    if (waiting != pending.end()) {
+    const bool was_preloaded = waiting != pending.end();
+    if (was_preloaded) {
         img = waiting->second.get();
         pending.erase(waiting);
     } else {
         img = load_picture(*this, name, palette);
     }
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count();
+    if (!was_preloaded && ms > 2.0 && img && (name.rfind("bg/", 0) == 0 || name.rfind("epi/", 0) == 0) &&
+        std::find(missed.begin(), missed.end(), name) == missed.end()) {
+        missed.push_back(name);
+        if (on_missed) on_missed(missed);
+    }
+    static const bool log_loads = std::getenv("AMG_PROFILE_PRIMS") != nullptr;  // which pictures the scripts wait for
+    if (log_loads && ms > 1.0)
+        std::fprintf(stderr, "SLOWPICTURE %s %.1f ms (%s)\n", name.c_str(), ms, was_preloaded ? "preload not finished" : "not preloaded");
     keep_actor(key, img);
     return img;
 }
 
 bool Graphics::exists(const std::string& name) const {
-    if (vita) {
-        std::string ext;
-        int width;
-        bool has_alpha;
-        if (!vita_gxt_layout(name, ext, width, has_alpha)) return false;
-        return graph_cpk.count(name + ext) != 0;
+    std::string ext;
+    int width;
+    bool has_alpha;
+    if (!vita_gxt_layout(name, ext, width, has_alpha)) return false;
+    return graph_cpk.count(name + ext) != 0;
+}
+
+Graphics::~Graphics() { warm_stop = true; }
+
+void Graphics::warm(const std::vector<std::string>& names) {
+    struct Job {
+        std::string name;
+        std::promise<ImagePtr> done;
+    };
+    auto jobs = std::make_shared<std::vector<Job>>();
+    for (const auto& name : names) {
+        const std::string key = name + "#0";
+        if (!exists(name) || images.count(key) || pending.count(key)) continue;
+        Job job{name, {}};
+        pending[key] = job.done.get_future().share();
+        jobs->push_back(std::move(job));
     }
-    uint32_t h = name_hash(name + ".tm2");
-    for (const auto& a : archives)
-        if (a.index.count(h)) return true;
-    return false;
+    if (jobs->empty()) return;
+    warm_task = std::async(std::launch::async, [this, jobs] {
+        for (auto& job : *jobs) job.done.set_value(warm_stop ? nullptr : load_picture(*this, job.name, 0));
+    });
 }
 
 void Graphics::preload(const std::string& name, int palette) {
@@ -1412,9 +1459,19 @@ bool Graphics::preload_event_picture(int64_t heroine, int64_t number, int64_t va
 
 bool Graphics::preload_extra(int64_t size, int64_t picture, int64_t variant) {
     char buf[64];
-    std::snprintf(buf, sizeof buf, "stand/x%s_%c%cx", size ? "s" : "l", char(0x41 + picture), char(0x61 + variant));
-    preload(buf);
-    return exists(buf);
+    std::snprintf(buf, sizeof buf, "body/x%s_%c%cx", size ? "s" : "l", char(0x41 + picture), char(0x61 + variant));
+    // The picture is shown through actor_canvas, which pastes it into a canvas: 8 MB of work that is done here too,
+    // off the game's thread, so showing the picture finds it ready.
+    const std::string stem(buf, std::strlen(buf) - 1);
+    if (!exists(buf)) return false;
+    if (!pending_whole.count(stem) && !images.count(buf + std::string("#0"))) {
+        static const bool disabled = std::getenv("AMG_NO_PRELOAD") != nullptr;
+        if (!disabled)
+            pending_whole[stem] = std::async(std::launch::async, [this, name = std::string(buf)] {
+                                      return compose_whole(load_picture(*this, name, 0));
+                                  }).share();
+    }
+    return true;
 }
 
 bool Graphics::preload_actor(int64_t character, int64_t cloth, int64_t pose) {
@@ -1428,9 +1485,7 @@ bool Graphics::preload_actor(int64_t character, int64_t cloth, int64_t pose) {
 int64_t Graphics::new_light_ball(int64_t layer) {
     auto obj = std::make_unique<LightBallObject>();
     obj->layer = layer;
-    int palette = record(209).palette;  // kaiwa/tama%1d: the pictures use the shared interface palette of their record
-    for (int k = 0; k < 3; ++k)
-        obj->parts[k] = vita ? ui_image(engine_tex(209), k) : image_named("kaiwa/tama" + std::to_string(k), palette);
+    for (int k = 0; k < 3; ++k) obj->parts[k] = ui_image(engine_tex(209), k);
     obj->rect[2] = obj->rect[3] = 48;
     return add(std::move(obj));
 }
@@ -1438,7 +1493,7 @@ int64_t Graphics::new_light_ball(int64_t layer) {
 int64_t Graphics::new_navi(int64_t layer) {
     auto obj = std::make_unique<NaviObject>();
     obj->layer = layer;
-    if (vita) {
+    {
         uint32_t w = 0, h = 0, pitch = 0;
         const uint8_t* pal = ui_pixels(ui_entry(engine_tex(201), 0), w, h, pitch);
         if (pal) {
@@ -1464,24 +1519,6 @@ int64_t Graphics::new_navi(int64_t layer) {
         }
         return add(std::move(obj));
     }
-    Record r = record(201);  // navi/navi_%1d
-    std::string data;
-    Tim2 t;
-    if (read_file("navi/navi_0.tm2", data) && parse_tim2(data, t)) {
-        // The palette as decode_image builds it, kept for the marks' indices.
-        std::string shared = size_t(r.palette) * 1024 < clt.size() ? clt.substr(size_t(r.palette) * 1024, 1024) : std::string();
-        const std::string& pal = t.clut.empty() ? shared : t.clut;
-        bool swizzled = t.clut.empty() || t.type == 5;
-        for (int i = 0; i < 256; ++i) {
-            size_t at = size_t(swizzled ? unswizzle(i) : i) * 4;
-            if (at + 4 <= pal.size()) std::memcpy(obj->colours[size_t(i)].data(), pal.data() + at, 4);
-        }
-        obj->work = std::make_shared<Image>(*decode_image(data, shared));
-        obj->image = std::make_shared<Image>(*obj->work);
-        obj->rect[2] = obj->work->w;
-        obj->rect[3] = obj->work->h;
-    }
-    return add(std::move(obj));
 }
 
 void Graphics::navi_mark(int64_t uid, int64_t node, int64_t state) {
@@ -1520,7 +1557,7 @@ void Graphics::set_clock(int64_t uid, int64_t time, double frames) {
     double v = word(0x28B398 + 4 * uint32_t(time), true);
     clock->parts[2].spin.set(0, v, 0, frames);
     clock->parts[3].spin.set(0, v / 12.0, 0, frames);
-    if (vita) {  // the Vita's tables (0x810AD964, 0x810AD9C4, 0x810ADA24) are the PS2's, checked word for word
+    {  // the Vita's tables (0x810AD964, 0x810AD9C4, 0x810ADA24) are the PS2's, checked word for word
         if (!clock->follow) {
             for (int h = 0; h < 24; ++h) {
                 clock->alpha_table[h] = word(0x28A8D8 + 4 * uint32_t(h), true);
@@ -1546,20 +1583,6 @@ void Graphics::set_clock(int64_t uid, int64_t time, double frames) {
             clock->left = 0;
         }
         clock->pick_faces();
-        return;
-    }
-    double hour = -v * 0.5;
-    int whole = int(hour);
-    double frac = hour - whole;
-    int h0 = ((whole % 24) + 24) % 24, h1 = (h0 + 1) % 24;
-    clock->front_alpha = word(0x28A8D8 + 4 * uint32_t(h0), true) * (1.0 - frac) + word(0x28A8D8 + 4 * uint32_t(h1), true) * frac;
-    for (int k = 0; k < 2; ++k) {
-        int64_t tmp = new_sprite(engine_tex(0xAF), int64_t(word((k == 0 ? 0x28A938 : 0x28A998) + 4 * uint32_t(h0), false)), clock->layer);
-        if (ScreenObject* t = get(tmp)) {
-            clock->parts[k].image = t->image;
-            clock->parts[k].name = t->name;
-        }
-        objects.erase(tmp);
     }
 }
 
@@ -1573,11 +1596,9 @@ int64_t Graphics::new_balloon(int64_t category, bool mark, int64_t layer) {
     int c = int(std::max<int64_t>(0, std::min<int64_t>(11, category)));
     for (int i = 0; i < 3; ++i) obj->colour[i] = colours[c][i];
     obj->show_mark = mark;
-    obj->vita = vita;
-    obj->disc = vita ? ui_image(215, 0) :  // Vita balloon: texture 215, variants 0, 1, 2 (code 0x8100B20E)
-                        image_named("maru/maru128", record(240).palette);
-    obj->mark = vita ? ui_image(215, 2) : image_named("maru/hatena", record(241).palette);
-    if (vita) obj->inner = ui_image(215, 1);
+    obj->disc = ui_image(215, 0);  // the balloon: texture 215, variants 0, 1, 2 (code 0x8100B20E)
+    obj->mark = ui_image(215, 2);
+    obj->inner = ui_image(215, 1);
     obj->rect[2] = 128;
     obj->rect[3] = 192;
     return add(std::move(obj));
@@ -1587,9 +1608,10 @@ int64_t Graphics::new_cut_in(int64_t layer) {
     auto obj = std::make_unique<CutInWindowObject>();
     obj->gfx = this;
     obj->layer = layer;
-    obj->frame = vita ? ui_image(engine_tex(320), 0) : image_named("mahjong/cut_frame", record(320).palette);
-    obj->image = vita ? ui_image(engine_tex(319), 0) : image_named("maru/cut_tex0", record(319).palette);
-    obj->rect[2] = obj->rect[3] = CutInWindowObject::INNER;
+    obj->frame = ui_image(engine_tex(320), 0);
+    obj->image = ui_image(engine_tex(319), 0);
+    obj->base_pattern = ui_image(engine_tex(319), 0);  // the second layer: variant 0, never changed (0x8100AE44)
+    obj->rect[2] = obj->rect[3] = CutInWindowObject::SIZE;
     return add(std::move(obj));
 }
 
@@ -1605,44 +1627,16 @@ int64_t Graphics::add(std::unique_ptr<ScreenObject> obj) {
 int64_t Graphics::new_sprite(int64_t texture, int64_t variant, int64_t layer) {
     auto obj = std::make_unique<ScreenObject>();
     obj->layer = layer;
-    obj->ui = vita;  // FIDELITY: read 0x81008124 and 0x8100880E, see view_of
+    obj->ui = true;  // FIDELITY: read 0x81008124 and 0x8100880E, see view_of
     if (texture == 0) {
         obj->rect[2] = SCREEN_W / VIEW_UNIT;
         obj->rect[3] = SCREEN_H / VIEW_UNIT;
         return add(std::move(obj));
     }
-    if (vita) {
-        obj->image = ui_image(texture, variant);
-        obj->rect[2] = obj->image ? obj->image->w : 0;
-        obj->rect[3] = obj->image ? obj->image->h : 0;
-        obj->name = std::to_string(texture) + ":" + std::to_string(variant);
-        return add(std::move(obj));
-    }
-    Record r = record(int(texture));
-    // The left/top of the table's rectangle is where the engine packs the texture in video
-    // memory, not an offset inside the file.
-    double w = r.rect[2], h = r.rect[3];
-    std::string name = r.name;
-    if (r.has_name) {
-        if (name.find("%s") != std::string::npos) {
-            static const char* weekdays[7] = {"sun", "mon", "tue", "wed", "thu", "fri", "sat"};
-            size_t p = name.find("%s");
-            name = name.substr(0, p) + weekdays[((variant % 7) + 7) % 7] + name.substr(p + 2);
-        } else if (name.find('%') != std::string::npos) {
-            name = format_number(name, variant);
-        }
-    }
-    ImagePtr img;
-    if (r.has_name) img = image_named(name, r.palette);
-    if (img && (w == 0 || h == 0)) {
-        w = img->w;
-        h = img->h;
-    }
-    obj->image = img;
-    obj->rect[0] = obj->rect[1] = 0.0;
-    obj->rect[2] = w;
-    obj->rect[3] = h;
-    obj->name = std::to_string(texture) + ":" + (r.has_name ? name : std::string("None"));
+    obj->image = ui_image(texture, variant);
+    obj->rect[2] = obj->image ? obj->image->w : 0;
+    obj->rect[3] = obj->image ? obj->image->h : 0;
+    obj->name = std::to_string(texture) + ":" + std::to_string(variant);
     return add(std::move(obj));
 }
 
@@ -1657,7 +1651,7 @@ int64_t Graphics::new_background(int64_t place, int64_t scene, int64_t mob, int6
     obj->name = buf;
     obj->scale_on_screen = true;
     obj->follow = 1.0;
-    if (vita && place >= 0 && place < 400) {
+    if (place >= 0 && place < 400) {
         // FIDELITY: read 0x81009262 (BG_Picture's creator): a byte per place at 0x810A8660 puts that background in the
         // interface view (origin 0) instead of the world's: the map's frame (200), the menus' pictures (139 to 149,
         // 207 to 216...). Event pictures are always in the world view (0x81009964). Not done yet: the interface view's
@@ -1706,13 +1700,12 @@ static int glyph_index(int64_t code) {
 }
 
 ImagePtr Graphics::glyph(int font, int palette, int64_t code) {
-    static const char* names[2] = {"font/K2_font28_24", "font/K2_font28_24im"};
     std::string key = "glyph#" + std::to_string(font) + "#" + std::to_string(((palette % 4) + 4) % 4) + "#" +
                       std::to_string(code);
     auto it = images.find(key);
     if (it != images.end()) return it->second;
     Font& f = fonts[font];
-    if (vita) {
+    {
         // font/AMV_font18_21(im).tm2: four 16-colour palettes (white, blue, pink, dark grey, as the PS2's) in the
         // first 1,024 bytes, then 4-bit pixels, 1,024 wide; glyph n is the 36x42 cell n % 28, n / 28 (the eboot's
         // glyph lookup 0x8101389E: the same Shift-JIS index as the PS2, 28 per row, cell height 42).
@@ -1751,38 +1744,6 @@ ImagePtr Graphics::glyph(int font, int palette, int64_t code) {
         images[key] = img;
         return img;
     }
-    if (!f.loaded) {
-        std::string data;
-        if (!read_file(std::string(names[font]) + ".tm2", data)) throw std::runtime_error("font missing");
-        Tim2 t;
-        if (!parse_tim2(data, t)) throw std::runtime_error("font is not a supported TIM2");
-        f.w = t.w;
-        f.h = t.h;
-        f.pixels = t.pixels;
-        for (size_t i = 0; i + 4 <= t.clut.size(); i += 4)
-            f.clut.push_back({uint8_t(t.clut[i]), uint8_t(t.clut[i + 1]), uint8_t(t.clut[i + 2]), uint8_t(t.clut[i + 3])});
-        f.loaded = true;
-    }
-    ImagePtr img;
-    int index = glyph_index(code);
-    if (index < f.h) {
-        const int GW = 24, GH = 28;
-        int pal = ((palette % 4) + 4) % 4;
-        auto im = std::make_shared<Image>();
-        im->w = GW;
-        im->h = GH;
-        im->px.resize(size_t(GW * GH * 4));
-        size_t row_bytes = size_t(f.w / 2);
-        for (int n = 0; n < GW * GH; ++n) {
-            uint8_t byte = uint8_t(f.pixels.at(size_t(index) * row_bytes + size_t(n / 2)));
-            int idx = (n & 1) ? (byte >> 4) : (byte & 0x0F);
-            const auto& e = f.clut.at(size_t(pal * 16 + idx));
-            std::memcpy(&im->px[size_t(n) * 4], e.data(), 4);
-        }
-        img = im;
-    }
-    images[key] = img;
-    return img;
 }
 
 namespace {
@@ -1793,9 +1754,16 @@ namespace {
 // FIDELITY: read 0x81087DA4 (the Vita's draw, K2R_CObjSprFont slot 12): the copy is 1.0 to the right and down, black
 // (0x810C0E98) under a character of palette 0 to 2 and white (0x810C0EA4) under one of palette 3, and not lit by the
 // object's light.
+// FIDELITY: read 0x8100865A and 0x8100F074 (docs/technical/d1-text-window.md): a character of palette 3 takes the font's
+// first (white) palette, multiplied by 0.2 when drawn (0x810C0EB0); the font's own fourth palette is not used.
+// The tint and the first palette are for palette % 4 == 3 (palettes 7 and 11 as well: d1-survey.md, two readings).
+static int vita_font_palette(int64_t palette) {
+    int p = int(((palette % 4) + 4) % 4);
+    return p < 3 ? p : 0;
+}
+
 struct CharObject : ScreenObject {
     ImagePtr shadow;
-    bool vita = false;
     bool black_shadow = false;
     std::unique_ptr<ScreenObject> clone() const override { return std::make_unique<CharObject>(*this); }
     void fill_all(std::vector<DrawItem>& out) const override {
@@ -1805,13 +1773,16 @@ struct CharObject : ScreenObject {
         if (shadow) {
             DrawItem item = base;
             item.image = shadow;
-            const double off = vita ? 1.0 : 2.0;
-            item.centre[0] += off;
-            item.centre[1] += off;
-            if (vita)
-                for (double& c : item.light) c = black_shadow ? 0.0 : 1.0;
+            item.centre[0] += 1.0;
+            item.centre[1] += 1.0;
+            for (double& c : item.light) c = black_shadow ? 0.0 : 1.0;
             out.push_back(std::move(item));
         }
+        if (((palette % 4) + 4) % 4 == 3)  // both 0x81008742 and 0x81087E4A test palette % 4 >= 3 (d1-survey.md)
+            for (double& c : base.light) c *= 0.2;
+#ifdef AMG_PERSONAL
+        if (name.size() > 5) base.char_code = int32_t(std::strtol(name.c_str() + 5, nullptr, 16));  // "char XXXX"
+#endif
         out.push_back(std::move(base));
     }
 };
@@ -1821,12 +1792,11 @@ int64_t Graphics::new_char(int font, int64_t code, int64_t palette, int64_t laye
                            double sy) {
     auto obj = std::make_unique<CharObject>();
     obj->layer = layer;
-    obj->image = glyph(font, int(palette), code);
-    if (palette >= 0 && palette < 4) obj->shadow = glyph(font, palette < 3 && !vita ? 3 : 0, code);
-    obj->vita = vita;
+    obj->image = glyph(font, vita_font_palette(palette), code);
+    if (palette >= 0 && palette < 4) obj->shadow = glyph(font, 0, code);
     obj->black_shadow = palette < 3;
-    obj->rect[2] = vita ? 36 : 24;  // the glyph cell: Vita 36x42, PS2 24x28
-    obj->rect[3] = vita ? 42 : 28;
+    obj->rect[2] = 36;  // the glyph cell: 36x42
+    obj->rect[3] = 42;
     obj->font = font;
     obj->palette = int(palette);
     char buf[32];
@@ -1837,8 +1807,8 @@ int64_t Graphics::new_char(int font, int64_t code, int64_t palette, int64_t laye
     return add(std::move(obj));
 }
 
-int64_t Graphics::new_snow(int64_t count, int64_t layer) {
-    auto obj = std::make_unique<SnowObject>(0, layer, count);
+int64_t Graphics::new_snow(int64_t count, int64_t layer, const int64_t dist[4], double size) {
+    auto obj = std::make_unique<SnowObject>(0, layer, count, dist, size, ui_image(245, 0));
     obj->name = "snow x" + std::to_string(count);
     return add(std::move(obj));
 }
@@ -1869,7 +1839,7 @@ ScreenObject* Graphics::get(int64_t uid) {
 void Graphics::actor_files(int64_t character, int64_t cloth, int64_t pose, std::string& body, std::string& face) {
     body.clear();
     face.clear();
-    if (vita) {
+    {
         // F4-37 (docs/technical/vita-cpk-format.md): the PS2's two-level table at other addresses. Each entry names
         // the whole picture stem: "b1_Aa" is the PS2's pose stem "b1_A" plus its cloth letter "a", so pose picks
         // the *12 term and cloth the +1 term (the PS2 appends char('a' + cloth) the same way). Nothing is
@@ -1885,15 +1855,6 @@ void Graphics::actor_files(int64_t character, int64_t cloth, int64_t pose, std::
         if (f) face = "face/" + exe_string(f);
         return;
     }
-    size_t at = size_t(ACTOR_INDEX + 2 * uint32_t(character) - VRAM + FILE_OFFSET);
-    uint32_t row = le16(exe, at);
-    size_t entry = size_t(ACTOR_FILES + 8 * (row * ACTOR_POSES + uint32_t(pose)) - VRAM + FILE_OFFSET);
-    uint32_t b = le32(exe, entry), f = le32(exe, entry + 4);
-    if (b) {
-        body = "stand/" + exe_string(b);
-        body.push_back(char(0x61 + cloth));
-    }
-    if (f) face = "stand/" + exe_string(f);
 }
 
 const std::vector<std::array<double, 7>>& Graphics::layout(const std::string& name) {
@@ -1901,7 +1862,7 @@ const std::vector<std::array<double, 7>>& Graphics::layout(const std::string& na
     if (it != layouts.end()) return it->second;
     std::vector<std::array<double, 7>> out;
     std::string data;
-    bool found = !name.empty() && (vita ? read_file(name + "z.zb", data) : archives[2].read(name_hash(name + "z.zb"), data));
+    bool found = !name.empty() && read_file(name + "z.zb", data);
     if (found) {
         for (size_t i = 0; i + 32 <= data.size(); i += 32) {
             std::array<double, 7> r;
@@ -1918,7 +1879,7 @@ void Graphics::actor_mouth(const std::string& face, double ox, double oy, double
     for (const auto& r : records) {
         if (r[6] >= 3) {
             // On the Vita the layout is in its double-resolution texels: halved back to the scripts' units.
-            double k = vita ? 0.5 : 1.0;
+            double k = 0.5;
             out[0] = ox + (r[0] + (r[4] - 1.0) * 0.5) * k - ActorObject::CANVAS_W * 0.5;
             out[1] = oy + (r[1] + (r[5] - 1.0) * 0.5) * k - ActorObject::CANVAS_H * 0.5;
             return;
@@ -1970,6 +1931,18 @@ void paste(Image& canvas, const Image& sheet, const std::vector<std::array<doubl
 
 }  // namespace
 
+// A whole picture pasted at the origin of an empty actor canvas (what actor_canvas makes of a body with no face).
+ImagePtr Graphics::compose_whole(const ImagePtr& sheet) {
+    if (!sheet) return nullptr;
+    auto canvas = std::make_shared<Image>();
+    canvas->w = 2 * ActorObject::CANVAS_W;
+    canvas->h = 2 * ActorObject::CANVAS_H;
+    canvas->px.assign(size_t(canvas->w) * size_t(canvas->h) * 4, 0);
+    std::vector<std::array<double, 7>> whole = {{0, 0, 0, 0, double(sheet->w), double(sheet->h), 0}};
+    paste(*canvas, *sheet, whole, 0.0, 0.0);
+    return canvas;
+}
+
 ImagePtr Graphics::actor_canvas(const std::string& body, const std::string& face, int eye, int mouth, double ox,
                                 double oy, int blush, int sweat, int drop) {
     char kbuf[64];
@@ -1978,12 +1951,23 @@ ImagePtr Graphics::actor_canvas(const std::string& body, const std::string& face
     auto it = images.find(key);
     if (it != images.end()) return it->second;
 
-    if (vita) {
+    {
         // The Vita's body is one whole picture (no layout of its own); its face layout (face/<stem>z.zb) has the
         // eyes in groups 1 and 2, the mouth in 3, as the PS2's, and the sweat drop (4) and blush (5) that the PS2
         // keeps in the body's layout. Offsets come in the scripts' units: twice that in texels.
         const int W = 2 * ActorObject::CANVAS_W, H = 2 * ActorObject::CANVAS_H;
         double vx = 2 * ox, vy = 2 * oy;
+        if (face.empty() && !body.empty() && vx == 0.0 && vy == 0.0) {
+            auto ready = pending_whole.find(body);
+            if (ready != pending_whole.end()) {
+                ImagePtr whole = ready->second.get();
+                pending_whole.erase(ready);
+                if (whole) {
+                    keep_actor(key, whole);
+                    return whole;
+                }
+            }
+        }
         auto canvas = std::make_shared<Image>();
         canvas->w = W;
         canvas->h = H;
@@ -2015,69 +1999,6 @@ ImagePtr Graphics::actor_canvas(const std::string& body, const std::string& face
         keep_actor(key, canvas);
         return canvas;
     }
-    const int W = ActorObject::CANVAS_W, H = ActorObject::CANVAS_H;
-    char bbuf[64];
-    std::snprintf(bbuf, sizeof bbuf, "#%.17g#%.17g", ox, oy);
-    std::string base_key = "actorbase#" + body + bbuf;
-    ImagePtr base;
-    auto bi = images.find(base_key);
-    if (bi != images.end()) {
-        base = bi->second;
-    } else {
-        auto canvas = std::make_shared<Image>();
-        canvas->w = W;
-        canvas->h = H;
-        canvas->px.assign(size_t(W) * size_t(H) * 4, 0);
-        ImagePtr sheet = body.empty() ? nullptr : image_named(body + "x");
-        if (sheet) {
-            std::vector<std::array<double, 7>> group0;
-            for (const auto& r : layout(body))
-                if (r[6] == 0) group0.push_back(r);
-            paste(*canvas, *sheet, group0, ox, oy);
-        }
-        base = canvas;
-        keep_actor(base_key, base);
-    }
-    auto canvas = std::make_shared<Image>(*base);
-    ImagePtr body_sheet = body.empty() ? nullptr : image_named(body + "x");
-    if (blush && body_sheet) {
-        std::vector<std::array<double, 7>> sel;
-        for (const auto& r : layout(body))
-            if (r[6] == 1) {
-                sel.push_back(r);
-                break;
-            }
-        paste(*canvas, *body_sheet, sel, ox, oy, blush * 16);
-    }
-    if (!face.empty()) {
-        ImagePtr face_sheet = image_named(face + "x");
-        const auto& records = layout(face);
-        auto pick = [&](int group, int index) -> const std::array<double, 7>* {
-            size_t first = records.size();
-            for (size_t i = 0; i < records.size(); ++i)
-                if (records[i][6] >= group) {
-                    first = i;
-                    break;
-                }
-            size_t at = first + size_t(index);
-            return at < records.size() ? &records[at] : nullptr;
-        };
-        std::vector<std::array<double, 7>> parts;
-        for (auto* r : {pick(1, eye), pick(2, eye), pick(3, mouth)})
-            if (r) parts.push_back(*r);
-        if (face_sheet) paste(*canvas, *face_sheet, parts, ox, oy);
-    }
-    if (sweat && body_sheet) {
-        std::vector<std::array<double, 7>> sel;
-        for (const auto& r : layout(body))
-            if (r[6] == 3) {
-                sel.push_back(r);
-                break;
-            }
-        paste(*canvas, *body_sheet, sel, ox, oy - drop, sweat * 16);
-    }
-    keep_actor(key, canvas);
-    return canvas;
 }
 
 void Graphics::keep_actor(const std::string& key, ImagePtr image) {
@@ -2102,6 +2023,7 @@ void Graphics::keep_actor(const std::string& key, ImagePtr image) {
 }
 
 void Graphics::step(double dt) {
+    ++steps;
     for (auto& [uid, obj] : objects) obj->step(dt);
 }
 
@@ -2303,52 +2225,70 @@ void draw(std::vector<uint8_t>& frame, const DrawItem& obj, bool smooth, int ymi
     }
 }
 
-void paint_snow(std::vector<uint8_t>& frame, const DrawItem& item, bool smooth, int ymin, int ymax) {
-    double a = std::min(item.alpha, 1.0);
-    if (a <= 0 || !item.flakes) return;
-    for (const auto& f : *item.flakes) {
-        if (smooth) {  // coverage of each pixel by the square, so the flake glides instead of hopping
-            double fx = f.x + 320 + std::sin(item.clock / 40.0 + f.phase) * 6, fy = f.y + 224;
-            double s = f.size + 0.5;
-            for (int j = int(std::floor(fy)); j <= int(std::floor(fy + s)); ++j) {
-                if (j < ymin || j >= ymax) continue;
-                double cy = std::max(0.0, std::min(j + 1.0, fy + s) - std::max(double(j), fy));
-                for (int i = int(std::floor(fx)); i <= int(std::floor(fx + s)); ++i) {
-                    if (i < 0 || i >= SCREEN_W) continue;
-                    double cx = std::max(0.0, std::min(i + 1.0, fx + s) - std::max(double(i), fx));
-                    double k = a * 0.8 * cx * cy;
-                    for (int c = 0; c < 3; ++c) {
-                        uint8_t& v = frame[(size_t(j) * SCREEN_W + size_t(i)) * 3 + size_t(c)];
-                        v = uint8_t(v + int((255 - v) * k));
-                    }
-                }
-            }
-        } else {
-            int px = int(f.x + 320 + std::sin(item.clock / 40.0 + f.phase) * 6);
-            int py = int(f.y + 224);
-            for (int j = py; j < py + f.size + 1; ++j) {
-                if (j < ymin || j >= ymax) continue;
-                for (int i = px; i < px + f.size + 1; ++i) {
-                    if (i < 0 || i >= SCREEN_W) continue;
-                    for (int c = 0; c < 3; ++c) {
-                        uint8_t& v = frame[(size_t(j) * SCREEN_W + size_t(i)) * 3 + size_t(c)];
-                        v = uint8_t(v + int((255 - v) * a * 0.8));
-                    }
-                }
-            }
-        }
-    }
-}
-
 }  // namespace
 
 std::shared_ptr<const Scene> Graphics::scene() const {
     auto out = std::make_shared<Scene>();
     out->items.reserve(objects.size());
+    out->hide_uid = hide_uid;
+    out->hide_image = hide_image;
+    out->stamp = steps;
+    // FIDELITY (docs/technical/d1-draw-order.md, read twice; a Vita3K capture of two overlapping characters is still to
+    // do, so AMG_VITA_DRAW_ORDER=1 turns it on): the engine sorts the characters of a layer by the zoom's x, the larger in
+    // front (0x8100DB4E), whatever the order they were made in. The orders the characters had are handed out again by
+    // that key; everything else keeps its own.
+    static const bool vita_order = std::getenv("AMG_VITA_DRAW_ORDER") != nullptr;
+    std::map<int64_t, int64_t> order_of;  // uid -> the order to draw it with
+    if (vita_order) {
+        std::map<int64_t, std::vector<const ActorObject*>> by_layer;
+        for (const auto& [uid, obj] : objects)
+            if (auto* actor = dynamic_cast<const ActorObject*>(obj.get()); actor && !actor->draw_target) by_layer[actor->layer].push_back(actor);
+        for (auto& [layer, actors] : by_layer) {
+            std::vector<int64_t> orders;
+            for (auto* a : actors) orders.push_back(a->order);
+            std::sort(orders.begin(), orders.end());  // the smallest order is drawn last: the front
+            std::stable_sort(actors.begin(), actors.end(), [](const ActorObject* a, const ActorObject* b) {
+                return a->zoom.parts[0].current.at(0) > b->zoom.parts[0].current.at(0);  // the larger zoom first: the front
+            });
+            for (size_t i = 0; i < actors.size(); ++i) order_of[actors[i]->uid] = orders[i];
+        }
+    }
     for (const auto& [uid, obj] : objects) {
         auto* actor = dynamic_cast<const ActorObject*>(obj.get());
         if (actor && actor->draw_target && objects.count(actor->draw_target)) continue;  // drawn by its cut-in window
+        const size_t from = out->items.size();
         obj->fill_all(out->items);
+        const bool text = obj->name.rfind("char ", 0) == 0;  // a character of text (new_char)
+        // a picture of the game's content (background, event picture, gallery or extras picture, character): never interface
+        const std::string& nm = obj->name;
+        const bool content = nm.rfind("bg/", 0) == 0 || nm.rfind("epi/", 0) == 0 || nm.rfind("extra ", 0) == 0 ||
+                             nm.rfind("actor ", 0) == 0;
+        for (size_t i = from; i < out->items.size(); ++i) {
+            out->items[i].uid = uid;
+            out->items[i].text = text;
+            out->items[i].content = content;
+        }
+        if (auto it = order_of.find(uid); it != order_of.end())
+            for (size_t i = from; i < out->items.size(); ++i) out->items[i].order = it->second;
+    }
+    if (hide_uid && mark.h > 0) {  // the selection mark in place of the hidden arrow (gfx.hpp, SelectionMark)
+        for (size_t i = 0; i < out->items.size(); ++i) {
+            const DrawItem& arrow = out->items[i];
+            if (arrow.uid != hide_uid) continue;
+            DrawItem bar;
+            bar.layer = arrow.layer;
+            bar.order = arrow.order;  // same key, made after it: drawn right after the arrow, before the older rows
+            bar.ui = arrow.ui;
+            bar.follow = arrow.follow;
+            bar.rect[2] = mark.x1 - mark.x0;
+            bar.rect[3] = mark.h;
+            bar.centre[0] = (mark.x0 + mark.x1) / 2;
+            bar.centre[1] = arrow.centre[1];
+            for (int c = 0; c < 3; ++c) bar.light[c] = mark.light[c];
+            bar.alpha = mark.alpha * std::min(1.0, arrow.alpha);
+            out->items.insert(out->items.begin() + std::ptrdiff_t(i) + 1, bar);
+            break;
+        }
     }
     // Back to front by layer; inside a layer the last created is drawn first (docs/technical/objects.md).
     std::stable_sort(out->items.begin(), out->items.end(), [](const DrawItem& a, const DrawItem& b) {
@@ -2379,7 +2319,6 @@ static Scene view_of(const Scene& scene) {
     Scene out = scene;
     double k = VIEW_UNIT * VIEW_SCALE, half_w = SCREEN_W / 2.0, half_h = SCREEN_H / 2.0;
     for (DrawItem& it : out.items) {
-        if (it.snow) continue;
         // The Vita scales a turned picture along its own axes (the PS2's scale_on_screen pictures, backgrounds and
         // event pictures, scale along the screen's). FIDELITY: read 0x81088CB0 and 0x81089D80 (BG_Picture's and
         // EventPicture's step): the zoom is corrected by the turn for the PS2's pixel aspect, x by
@@ -2424,32 +2363,219 @@ static Scene view_of(const Scene& scene) {
     if (UI_SCALE != 1.0) {
         const double u = UI_SCALE;
         auto is_interface = [&](const DrawItem& it) {
-            if (it.snow || it.layer < UI_FIRST_LAYER) return false;
+            if (it.snow || it.content || it.layer < UI_FIRST_LAYER) return false;
             const double w = std::fabs(it.rect[2]) * it.scale[0], h = std::fabs(it.rect[3]) * it.scale[1];
             // covers the screen: a background, a fade, a side bar (a full-width text window is interface)
             return !(h >= 0.9 * SCREEN_H || (w >= 0.9 * SCREEN_W && h >= 0.6 * SCREEN_H));
         };
-        // One anchor for the whole screen, or the parts of a menu would drift apart: the middle horizontally; vertically the
-        // bottom (top) edge if the weight of the interface lies in the lower (upper) third, as a text window does, else the
-        // middle. The weight is the area: a few small stray items (markers at an edge, a hidden hint) must not pull the
-        // anchor to the middle and lift the text window off the bottom of the screen.
-        double weight = 0.0, weighted_y = 0.0;
-        for (const DrawItem& it : out.items) {
-            if (!is_interface(it) || it.alpha <= 0.01) continue;
-            const double area = std::fabs(it.rect[2] * it.scale[0]) * std::fabs(it.rect[3] * it.scale[1]);
-            weight += area;
-            weighted_y += area * it.centre[1];
-        }
-        const double middle = weight > 0 ? weighted_y / weight : 0.0;
-        const double ax = 0.0, ay = weight <= 0 ? 0.0 : middle > half_h / 3 ? half_h : middle < -half_h / 3 ? -half_h : 0.0;
-        for (DrawItem& it : out.items) {
+        // Anchored shrink (docs/technical/interface-scale.md). The visible interface items are put in groups (items whose
+        // boxes overlap, and groups whose boxes overlap, so a panel and what is drawn on it are one piece); each group
+        // shrinks about its own anchor, the point that keeps the ratio of its free margins to the screen's edges: on each
+        // axis a = lo + size * m_lo / (m_lo + m_hi), the margins clamped at 0 (plus a small constant so that a group as
+        // wide as the screen anchors at its middle with no jump). So what touches the left edge stays at the left edge,
+        // a corner stays in its corner, what is centred stays centred, groups never cross (the anchors keep the groups'
+        // order) and what lies outside the screen keeps its anchor on its own outer edge and stays outside.
+        const size_t n = out.items.size();
+        std::vector<int> group(n, -1);
+        struct Box { double x0, y0, x1, y1, area, th = 0.0; int64_t l0 = 0, l1 = 0; };  // th: line height if only text; l0..l1: layers
+        std::vector<Box> boxes;  // per group
+        std::vector<char> kind;  // per group: 1 live, 0 merged away, 2 a lone item (hidden or outside the screen)
+        auto box_of = [&](const DrawItem& it) {
+            const double hw = std::fabs(it.rect[2] * it.scale[0]) / 2, hh = std::fabs(it.rect[3] * it.scale[1]) / 2;
+            return Box{it.centre[0] - hw, it.centre[1] - hh, it.centre[0] + hw, it.centre[1] + hh, 4 * hw * hh,
+                       it.text ? 2 * hh : 0.0, it.layer, it.layer};
+        };
+        // When two boxes are one piece (interface-scale.md, "Groups"): one lies at least half inside the other (a panel and
+        // its rows, a stroke and its letters, the text window and its text); or they touch and neither spans the screen's
+        // width and their layers are next to each other (a glyph and its label, the pieces of a panel's frame, the topic
+        // wheel's icons; a bar across the screen must not swallow the calendar it touches, a dialog on layer 12 must not
+        // swallow the main-menu column on layer 10 beside it); or both are text and the gap is under a line (the lines of one
+        // paragraph, also on a full-screen page).
+        const double pad = 2.0 * VIEW_UNIT;
+        auto meet = [&](const Box& a, const Box& b) {
+            const double ix = std::min(a.x1, b.x1) - std::max(a.x0, b.x0), iy = std::min(a.y1, b.y1) - std::max(a.y0, b.y0);
+            const double aa = (a.x1 - a.x0) * (a.y1 - a.y0), ab = (b.x1 - b.x0) * (b.y1 - b.y0);
+            if (ix > 0 && iy > 0 && ix * iy >= 0.5 * std::min(aa, ab)) return true;
+            if (a.th > 0 && b.th > 0) {
+                const double p = std::max(pad, std::min(a.th, b.th));
+                if (ix > -p && iy > -p) return true;
+            }
+            auto spans = [&](const Box& c) { return c.x1 - c.x0 >= 0.9 * SCREEN_W; };
+            const bool near_layers = a.l0 <= b.l1 + 1 && b.l0 <= a.l1 + 1;
+            return near_layers && !spans(a) && !spans(b) && ix > -pad && iy > -pad;
+        };
+        auto on_screen = [&](const Box& b) { return b.x1 > -half_w && b.x0 < half_w && b.y1 > -half_h && b.y0 < half_h; };
+        for (size_t i = 0; i < n; ++i) {
+            const DrawItem& it = out.items[i];
             if (!is_interface(it)) continue;
+            Box b = box_of(it);
+            // Hidden items and items wholly outside the screen join nobody (a hidden panel would chain unrelated items; a
+            // parked entry must not drag a panel on screen): each is its own group.
+            if (it.alpha <= 0.01 || !on_screen(b)) {
+                group[i] = int(boxes.size());
+                boxes.push_back(b);
+                kind.push_back(2);
+                continue;
+            }
+            int g = int(boxes.size());
+            boxes.push_back(b);
+            kind.push_back(1);
+            group[i] = g;
+            // Merge every live group the (growing) group g meets, until none is left.
+            for (bool again = true; again;) {
+                again = false;
+                for (size_t j = 0; j < boxes.size(); ++j) {
+                    if (int(j) == g || kind[j] != 1 || !meet(boxes[j], boxes[size_t(g)])) continue;
+                    for (size_t m = 0; m < i; ++m) if (group[m] == int(j)) group[m] = g;
+                    Box& G = boxes[size_t(g)];
+                    G = {std::min(G.x0, boxes[j].x0), std::min(G.y0, boxes[j].y0), std::max(G.x1, boxes[j].x1),
+                         std::max(G.y1, boxes[j].y1), G.area + boxes[j].area,
+                         (G.th > 0 && boxes[j].th > 0) ? std::min(G.th, boxes[j].th) : 0.0,
+                         std::min(G.l0, boxes[j].l0), std::max(G.l1, boxes[j].l1)};
+                    kind[j] = 0;
+                    again = true;
+                }
+            }
+        }
+        // The anchor comes from the box of the group's PRINCIPAL item (interface-scale.md, "Stability"): its largest member,
+        // ties (within CORE of that area) to the lowest uid. Other members (the L1/R1 marks that slide beside the tabs, a
+        // bobbing arrow, a mark that fades in, entries sliding in one by one) do not change it, so the group stays still.
+        constexpr double CORE = 0.9;  // within this share of the largest area: a tie, the oldest (lowest uid) wins
+        std::vector<double> big(boxes.size(), 0.0);
+        std::vector<Box> core(boxes.size(), Box{1e30, 1e30, -1e30, -1e30, 0.0});
+        for (size_t i = 0; i < n; ++i)
+            if (group[i] >= 0) big[size_t(group[i])] = std::max(big[size_t(group[i])], box_of(out.items[i]).area);
+        // Per axis: the low side shared by the most tied members (a column's entries aligned at the left), the box of the
+        // oldest of those, so entries nudged by the cursor or sliding in or out do not count; if no two share it, the
+        // oldest tied member's.
+        std::vector<std::vector<std::pair<int64_t, Box>>> ties(boxes.size());
+        for (size_t i = 0; i < n; ++i) {
+            if (group[i] < 0) continue;
+            const Box b = box_of(out.items[i]);
+            if (b.area >= CORE * big[size_t(group[i])]) ties[size_t(group[i])].push_back({out.items[i].uid, b});
+        }
+        for (size_t g = 0; g < boxes.size(); ++g) {
+            auto& t = ties[g];
+            if (t.empty()) continue;
+            std::sort(t.begin(), t.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+            for (int axis = 0; axis < 2; ++axis) {
+                auto lo = [&](const Box& b) { return axis ? b.y0 : b.x0; };
+                const Box* best = &t[0].second;
+                size_t most = 1;
+                for (const auto& c : t) {
+                    size_t same = 0;
+                    for (const auto& d : t) same += std::fabs(lo(d.second) - lo(c.second)) < 0.5;
+                    if (same > most) { most = same; best = &c.second; }
+                }
+                if (axis) { core[g].y0 = best->y0; core[g].y1 = best->y1; }
+                else { core[g].x0 = best->x0; core[g].x1 = best->x1; }
+            }
+        }
+        const double eps = 2.0 * VIEW_UNIT;
+        auto anchor = [&](double lo, double hi, double half) {
+            // A live group's box is cut to the screen: a member sliding in from beyond an edge does not move the anchor
+            // (it stays on the edge while the box crosses it). A lone item wholly outside keeps its own box.
+            if (hi > -half && lo < half) { lo = std::max(lo, -half); hi = std::min(hi, half); }
+            const double m_lo = std::max(0.0, lo + half), m_hi = std::max(0.0, half - hi);
+            return lo + (hi - lo) * (m_lo + eps) / (m_lo + m_hi + 2 * eps);
+        };
+        std::vector<double> gax(boxes.size()), gay(boxes.size());
+        double biggest = -1;
+        out.ui_u = u;
+        // Anchor memory (interface-scale.md, "Stability"). A file-level state, keyed by the uid of each live group's
+        // principal: its own box, the anchor shown, and what is left of an easing. It advances once per distinct scene
+        // stamp; every other pass over the same frame reads the previous frame's state without changing it, so the
+        // renderer and the pointer see the same anchors. Rule: while the former principal is still in the group with its
+        // box unchanged, the group keeps its anchor (another member that grows over it or starts to overlap does not take
+        // over); when the principal moves its anchor follows it at once (a sliding menu slides smoothly); when it is
+        // replaced (removed, or moved while another takes over), the anchor eases from the old to the new one over EASE
+        // frames instead of jumping. Entries of groups that are gone are dropped at the next frame.
+        struct Hold { double bx0, by0, bx1, by1, ax, ay, ox, oy; int left; int64_t principal; };  // b*: the member's own box
+        static std::unordered_map<int64_t, Hold> prev, cur;
+        static int64_t cur_stamp = -1;
+        constexpr int EASE = 8;
+        static const bool hold_on = [] { const char* e = std::getenv("AMG_UI_HOLD"); return !e || std::strcmp(e, "0") != 0; }();
+        const bool remember = hold_on && scene.stamp != 0;  // AMG_UI_HOLD=0: no memory, to measure what it changes
+        if (remember && scene.stamp != cur_stamp) {
+            prev.swap(cur);
+            cur.clear();
+            cur_stamp = scene.stamp;
+        }
+        std::vector<std::vector<size_t>> members(boxes.size());
+        for (size_t i = 0; i < n; ++i)
+            if (group[i] >= 0) members[size_t(group[i])].push_back(i);
+        auto same_box = [](const Hold& h, const Box& b) {
+            return std::fabs(h.bx0 - b.x0) < 0.25 && std::fabs(h.by0 - b.y0) < 0.25 && std::fabs(h.bx1 - b.x1) < 0.25 &&
+                   std::fabs(h.by1 - b.y1) < 0.25;
+        };
+        for (size_t g = 0; g < boxes.size(); ++g) {
+            if (kind[g] == 0) continue;
+            const Box& c = core[g].x0 <= core[g].x1 ? core[g] : boxes[g];
+            gax[g] = anchor(c.x0, c.x1, half_w);
+            gay[g] = anchor(c.y0, c.y1, half_h);
+            if (remember && kind[g] == 1 && !ties[g].empty()) {
+                int64_t p = ties[g][0].first;
+                Box pb = ties[g][0].second;
+                // A former principal among the members: one whose box is unchanged first, then the current principal
+                // itself, then any (the lowest uid, members being in drawing order: the first met).
+                const Hold* old = nullptr;
+                int64_t old_uid = 0;
+                int score = -1;
+                for (size_t i : members[g]) {
+                    auto f = prev.find(out.items[i].uid);
+                    if (f == prev.end()) continue;
+                    const bool was_principal = f->second.principal == out.items[i].uid;
+                    const int s = same_box(f->second, box_of(out.items[i])) ? 2 + was_principal
+                                : (was_principal && out.items[i].uid == p ? 1 : 0);
+                    if (s > score) { score = s; old = &f->second; old_uid = out.items[i].uid; }
+                }
+                Hold h{pb.x0, pb.y0, pb.x1, pb.y1, gax[g], gay[g], 0.0, 0.0, 0, p};
+                if (score >= 2) {
+                    // Keep the anchor while a member stands still, and any easing left as it is: an easing advances only on
+                    // frames where the whole group moves, so it never moves a still piece (interface-scale.md, "Event
+                    // screens": the paragraph that types in, the page mark left alone while the page slides out).
+                    h = *old;
+                    p = old_uid;
+                } else if (old && old_uid == p) {
+                    h.ox = old->ox;  // the same principal moved: follow it, finishing any easing
+                    h.oy = old->oy;
+                    h.left = old->left > 0 ? old->left - 1 : 0;
+                } else if (old) {
+                    // replaced: ease from the anchor shown so far to the new one
+                    const double sx = old->ax + old->ox * old->left / EASE, sy = old->ay + old->oy * old->left / EASE;
+                    h.ox = sx - gax[g];
+                    h.oy = sy - gay[g];
+                    h.left = EASE - 1;
+                }
+                h.principal = p;
+                for (size_t i : members[g]) {  // every member carries the group's anchor, so any survivor can hand it on
+                    const Box b = box_of(out.items[i]);
+                    cur[out.items[i].uid] = Hold{b.x0, b.y0, b.x1, b.y1, h.ax, h.ay, h.ox, h.oy, h.left, p};
+                }
+                gax[g] = h.ax + h.ox * h.left / EASE;
+                gay[g] = h.ay + h.oy * h.left / EASE;
+            }
+            if (kind[g] == 1 && boxes[g].area > biggest) {
+                biggest = boxes[g].area;
+                out.ui_ax = gax[g];
+                out.ui_ay = gay[g];
+            }
+        }
+        // No frame clip any more: an item outside the screen stays outside (its anchor is on its outer edge), and the
+        // picture's own edge cuts what straddles it, as at 100 %. Only the item's own clip moves with it.
+        for (size_t i = 0; i < n; ++i) {
+            if (group[i] < 0) continue;
+            DrawItem& it = out.items[i];
+            const double ax = gax[size_t(group[i])], ay = gay[size_t(group[i])];
+            it.shrunk = true;
+            it.ui_ax = ax;
+            it.ui_ay = ay;
             it.centre[0] = ax + (it.centre[0] - ax) * u;
             it.centre[1] = ay + (it.centre[1] - ay) * u;
             it.scale[0] *= u;
             it.scale[1] *= u;
             if (it.clipped) {
-                const double cx = half_w + ax, cy = half_h + ay;  // the anchor in screen pixels
+                const double cx = half_w + ax, cy = half_h + ay;  // the anchor in screen pixels from the corner
                 it.clip[0] = cx + (it.clip[0] - cx) * u;
                 it.clip[2] = cx + (it.clip[2] - cx) * u;
                 it.clip[1] = cy + (it.clip[1] - cy) * u;
@@ -2485,9 +2611,56 @@ static Scene view_of(const Scene& scene) {
     return out;
 }
 
+// Mouse mode (docs/technical/mouse-native-design.md 2.5): the arrow of the menu the mouse drives is not drawn; the lit
+// entry is the mark of the selection. Only the drawing leaves it out: the pointer still sees it.
+static void drop_hidden(Scene& s) {
+    if (!s.hide_uid && !s.hide_image) return;
+    s.items.erase(std::remove_if(s.items.begin(), s.items.end(), [&](const DrawItem& it) { return it.uid == s.hide_uid || (s.hide_image && it.image == s.hide_image); }),
+                  s.items.end());
+}
+
 Scene Graphics::view_scene(const Scene& scene) {
     bool identity = VIEW_UNIT == 1.0 && VIEW_SCALE == 1.0 && UI_SCALE == 1.0;
-    return identity ? scene : view_of(scene);
+    Scene out = identity ? scene : view_of(scene);
+    drop_hidden(out);
+    return out;
+}
+
+Scene Graphics::pointer_scene(const Scene& scene) {
+    // view_of keeps the items one for one, in order. The scale stays in the scene's own measure (the pointer turns texels
+    // and units into script units itself) with the shrink applied, so at 100 % the pointer sees what it always saw.
+    if (VIEW_UNIT == 1.0 && VIEW_SCALE == 1.0 && UI_SCALE == 1.0) return scene;  // the view is the identity
+    Scene viewed = view_of(scene);
+    Scene out = scene;
+    out.ui_u = viewed.ui_u;
+    out.ui_ax = viewed.ui_ax / VIEW_UNIT;
+    out.ui_ay = viewed.ui_ay / VIEW_UNIT;
+    for (size_t i = 0; i < out.items.size() && i < viewed.items.size(); ++i) {
+        DrawItem& it = out.items[i];
+        const DrawItem& v = viewed.items[i];
+        it.centre[0] = v.centre[0] / VIEW_UNIT;
+        it.centre[1] = v.centre[1] / VIEW_UNIT;
+        it.shrunk = v.shrunk;
+        it.ui_ax = v.ui_ax / VIEW_UNIT;
+        it.ui_ay = v.ui_ay / VIEW_UNIT;
+        if (v.shrunk) {
+            // wholly outside the screen (an entry parked beyond the edge): not drawn, so not under the mouse
+            const double hw = std::fabs(v.rect[2] * v.scale[0]) / 2, hh = std::fabs(v.rect[3] * v.scale[1]) / 2;
+            if (v.centre[0] + hw <= -SCREEN_W / 2.0 || v.centre[0] - hw >= SCREEN_W / 2.0 ||
+                v.centre[1] + hh <= -SCREEN_H / 2.0 || v.centre[1] - hh >= SCREEN_H / 2.0)
+                it.alpha = 0.0;
+            it.scale[0] *= viewed.ui_u;
+            it.scale[1] *= viewed.ui_u;
+        }
+        it.clipped = v.clipped;
+        for (int k = 0; k < 4; ++k) it.clip[k] = v.clip[k];
+        if (v.clipped) {  // wholly outside its own clip: not drawn, so not under the mouse
+            const double x = SCREEN_W / 2.0 + v.centre[0], y = SCREEN_H / 2.0 + v.centre[1];
+            const double hw = std::fabs(v.rect[2] * v.scale[0]) / 2, hh = std::fabs(v.rect[3] * v.scale[1]) / 2;
+            if (x + hw <= v.clip[0] || x - hw >= v.clip[2] || y + hh <= v.clip[1] || y - hh >= v.clip[3]) it.alpha = 0.0;
+        }
+    }
+    return out;
 }
 
 std::vector<uint8_t> Graphics::render_scene(const Scene& scene_in, bool smooth) {
@@ -2505,7 +2678,9 @@ std::vector<uint8_t> Graphics::render_scene(const Scene& scene_in, bool smooth) 
     bool identity = VIEW_UNIT == 1.0 && VIEW_SCALE == 1.0 && UI_SCALE == 1.0;
     Scene viewed;
     if (!identity) viewed = view_of(scene_in);
-    const Scene& scene = identity ? scene_in : viewed;
+    else if (scene_in.hide_uid || scene_in.hide_image) viewed = scene_in;
+    drop_hidden(viewed);
+    const Scene& scene = (identity && !scene_in.hide_uid && !scene_in.hide_image) ? scene_in : viewed;
     std::vector<uint8_t> frame(size_t(SCREEN_W) * SCREEN_H * 3, 0);
     // Horizontal bands on separate threads: every pixel still receives the objects in the same order,
     // so the picture is identical to a single-threaded render.
@@ -2516,8 +2691,7 @@ std::vector<uint8_t> Graphics::render_scene(const Scene& scene_in, bool smooth) 
     }();
     auto paint_band = [&](int ymin, int ymax) {
         for (const DrawItem& item : scene.items) {
-            if (item.snow) paint_snow(frame, item, smooth, ymin, ymax);
-            else draw(frame, item, smooth, ymin, ymax);
+            draw(frame, item, smooth, ymin, ymax);
         }
     };
     std::vector<std::thread> workers;
@@ -2628,14 +2802,19 @@ void install_graphics(VM& vm) {
     // NodeMapIcon: one cell of the action map's hexagon grid (K2R_CObjNodeIcon, 0x19DEC8 to 0x1A26A8).
     // The engine object owns up to five child sprites, all centred on the cell: hexagon base, glow,
     // symbol, marker and an extra. `set(code)` picks their textures (K2R_CObjNodeIcon::setPic,
-    // 0x19EA30, read in full; see objects.md); `show` places them at once, `open` brings them in
-    // with a short zoom and fade (constants read from `open`; the exact curve is an approximation).
+    // 0x19EA30, read in full; see objects.md). Vita (vtable 0x810C1B0C, read 2026-10-27): `show(x, y, a)` places them at
+    // once with `a` as the opacity (the cells at the grid's edge fade out; the zoom stays 1), `open` fades them in over
+    // 9 frames linearly and zooms the symbol and the marker from 0 to 1 the same way (the hexagon and the glow do not
+    // zoom), `close` fades out and zooms the marker to 0. The marker of the NEW codes sits 10 units lower.
     struct NodeIcon {
         int64_t layer = 0;
         int tex[8] = {0, 0, 0, 0, 0, 0, 0, 0};  // hexagon, glow, symbol (clock: back face), marker, extra; clock long hand, short hand, front face
         int variant[8] = {0, 0, 0, 0, 0, 0, 0, 0};
         int64_t kids[8] = {0, 0, 0, 0, 0, 0, 0, 0};
         double x = 0, y = 0, scale = 1.0;
+        double opacity = 1.0;       // the third argument of show (0 to 1)
+        bool dim = false;           // symbol at 0.7 of the opacity (states 4 and 5 of the map's own symbols), 0x81093258
+        bool sway = false;          // symbol bobbing (states 3 and 5), 0x81095000
         bool visible = false;
         double front_alpha = 0.0;  // clock: opacity of the front face
     };
@@ -2697,16 +2876,18 @@ void install_graphics(VM& vm) {
         for (int i = 0; i < 8; ++i) {
             ScreenObject* o = ic.kids[i] ? g->get(ic.kids[i]) : nullptr;
             if (!o) continue;
-            double alpha = ic.visible ? (i == 1 ? 0.5 : i == 7 ? ic.front_alpha : 1.0) : 0.0;
-            // The NEW marks (marker codes 2 and 3) sit 14 pixels below the centre (show, 0x19FD84).
-            double dy = (i == 3 && ic.tex[3] >= g->engine_tex(0xAC)) ? 14.0 * ic.scale : 0.0;
+            double alpha = ic.visible ? ic.opacity * (i == 1 ? 0.5 : i == 7 ? ic.front_alpha : i == 2 && ic.dim ? 0.7 : 1.0) : 0.0;
+            // The NEW marks (marker codes 2 and 3) sit 10 units below the centre (open and show, 0x81093CD4, 0x81093258).
+            double dy = (i == 3 && ic.tex[3] >= g->engine_tex(0xAC)) ? 10.0 : 0.0;
             o->pos.parts[0].start({ic.x, ic.y + dy}, 0, 0);
-            if (zoom_from > 0) {
-                o->zoom.parts[0].start({zoom_from, zoom_from}, 0, 0);
-                o->zoom.parts[0].start({ic.scale, ic.scale}, 2, alpha_time);
+            o->sway_phase = (i == 2 && ic.sway) ? std::max(o->sway_phase, 0.0) : -1.0;
+            if (zoom_from > 0 && (i == 2 || i == 3)) {  // opening: the symbol and the marker grow from nothing
+                o->zoom.parts[0].start({0.0, 0.0}, 0, 0);
+                o->zoom.parts[0].start({ic.scale, ic.scale}, 0, alpha_time);
             } else {
                 o->zoom.parts[0].start({ic.scale, ic.scale}, 0, 0);
             }
+            if (zoom_from > 0 && alpha_time > 0) o->alpha.parts[0].start({0.0}, 0, 0);
             o->alpha.parts[0].start({alpha}, 0, alpha_time);
         }
     };
@@ -2724,6 +2905,7 @@ void install_graphics(VM& vm) {
     };
     auto set_code = [g, table_entry](NodeIcon& ic, int code, int extra) {
         for (int i = 0; i < 8; ++i) ic.tex[i] = ic.variant[i] = 0;
+        ic.dim = ic.sway = false;
         bool grid = (code >> 15) & 1;
         int kind = (code >> 12) & 7;
         if (kind == 0) {  // a plain picture: node_flag<n>, and the grid tile when the grid is on
@@ -2746,6 +2928,11 @@ void install_graphics(VM& vm) {
         int type = (code >> 8) & 15;
         if (type == 0) return;
         int sub = (code >> 5) & 3, state = (code >> 2) & 7, low = code & 3;
+        // 0x810929AE: the symbol is dimmed in states 4 and 5 and bobs in states 3 and 5, when the picture is not a flat one,
+        // the type is not 3, 4 or 11 and the marker is not 1 (hypothesis: that "not flat" is every code of kind other than 0)
+        bool plain = type == 3 || type == 4 || type == 11 || low == 1;
+        ic.dim = !plain && (state == 4 || state == 5);
+        ic.sway = !plain && (state == 3 || state == 5);
         int s4 = sub, s5 = 0;
         if (type >= 13) {
             s5 = sub + type - 13;
@@ -2811,15 +2998,17 @@ void install_graphics(VM& vm) {
                 ic->x = unit(st, b, 0);
                 ic->y = unit(st, b, 1);
                 ic->scale = 1.0;
+                ic->opacity = 1.0;
                 ic->visible = true;
-                icon_place(*ic, 9.0, 0.7);
+                icon_place(*ic, 9.0, 1.0);
             }
             return st[b];
         };
-        c->prims[4] = [icon_of, icon_place](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
+        c->prims[4] = [g, icon_of, icon_place](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
             if (NodeIcon* ic = icon_of(st, b)) {
                 ic->visible = false;
                 icon_place(*ic, 9.0, 0);
+                if (ScreenObject* o = ic->kids[3] ? g->get(ic->kids[3]) : nullptr) o->zoom.parts[0].start({0.0, 0.0}, 0, 9.0);  // close: the marker shrinks
             }
             return st[b];
         };
@@ -2827,7 +3016,8 @@ void install_graphics(VM& vm) {
             if (NodeIcon* ic = icon_of(st, b)) {
                 ic->x = unit(st, b, 0);
                 ic->y = unit(st, b, 1);
-                ic->scale = unit(st, b, 2);
+                ic->scale = 1.0;
+                ic->opacity = std::max(0.0, std::min(1.0, unit(st, b, 2)));  // the third argument is the opacity
                 ic->visible = true;
                 icon_place(*ic, 0, 0);
             }
@@ -3032,7 +3222,7 @@ void install_graphics(VM& vm) {
         ScreenObject* obj = target(st, b);
         if (obj) {
             int64_t code = int_of(arg(st, b, 0));
-            obj->image = g->glyph(obj->font, obj->palette, code);
+            obj->image = g->glyph(obj->font, vita_font_palette(obj->palette), code);
             if (auto* c = dynamic_cast<CharObject*>(obj); c && c->shadow)
                 c->shadow = g->glyph(obj->font, obj->palette < 3 ? 3 : 0, code);
             char buf[32];
@@ -3274,9 +3464,9 @@ void install_graphics(VM& vm) {
     // initialize(category, mark, layer): the third argument is the layer; the second says whether the `?` shows.
     // The Vita's is initialize(mark, layer): no colour category (its balloons are the white ones, category 0).
     prim("Balloon", 1, [g, arg, self_iv](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
-        const Value& m = arg(st, b, g->vita ? 0 : 1);
+        const Value& m = arg(st, b, 0);
         bool mark = !(m.tag == Tag::Nil || m.tag == Tag::False || (m.tag == Tag::Int && m.i == 0));
-        int64_t category = g->vita ? 0 : int_of(arg(st, b, 0)), layer = int_of(arg(st, b, g->vita ? 1 : 2));
+        int64_t category = 0, layer = int_of(arg(st, b, 1));
         self_iv(st, b).at(0) = Value::integer(g->new_balloon(category, mark, layer));
         return st[b];
     });
@@ -3327,22 +3517,31 @@ void install_graphics(VM& vm) {
         return st[b];
     });
 
-    // --- SnowEffect (approximation) --------------------------------------------------------------
+    // --- SnowEffect --------------------------------------------------------------
     prim("SnowEffect", 0, [g, arg, self_iv](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
-        int64_t count = int64_t(number(arg(st, b, 1)));
-        self_iv(st, b).at(0) = Value::integer(g->new_snow(count ? count : 100, 3));
+        // initialize(mode, count, d1, d2, d3, d4, size): the flake mode, how many, the box's four distances, the flakes' size
+        const int64_t dist[4] = {int64_t(number(arg(st, b, 2))), int64_t(number(arg(st, b, 3))), int64_t(number(arg(st, b, 4))),
+                                 int64_t(number(arg(st, b, 5)))};
+        self_iv(st, b).at(0) = Value::integer(g->new_snow(int64_t(number(arg(st, b, 1))), 3, dist, number(arg(st, b, 6))));
         return st[b];
     });
     prim("SnowEffect", 1, destruct);
-    // setAmount(count, time) (2026-10-17): as many flakes as asked, reached linearly over `time` frames. turnCam and
-    // moveCam turn and move the camera of the engine's 3D snow (K2R_CObjSnow, not modelled: the port's snow is a flat
-    // APPROXIMATION, see objects.md), so they are no-ops here on purpose.
+    // setAmount(count, time): the target number of flakes, reached linearly over `time` frames. turnCam(yaw, pitch, mode,
+    // time) and moveCam(x, y, z, mode, time) turn and move the camera (the modes are not told apart: every script call
+    // uses 0, and the move is linear).
     prim("SnowEffect", 3, [target, arg](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
         if (auto* sn = dynamic_cast<SnowObject*>(target(st, b))) sn->set_amount(number(arg(st, b, 0)), number(arg(st, b, 1)));
         return st[b];
     });
-    prim("SnowEffect", 6, [](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value { return st[b]; });
-    prim("SnowEffect", 7, [](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value { return st[b]; });
+    prim("SnowEffect", 6, [target, arg](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
+        if (auto* sn = dynamic_cast<SnowObject*>(target(st, b))) sn->turn(number(arg(st, b, 0)), number(arg(st, b, 1)), number(arg(st, b, 3)));
+        return st[b];
+    });
+    prim("SnowEffect", 7, [target, arg](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
+        if (auto* sn = dynamic_cast<SnowObject*>(target(st, b)))
+            sn->move(number(arg(st, b, 0)), number(arg(st, b, 1)), number(arg(st, b, 2)), number(arg(st, b, 4)));
+        return st[b];
+    });
     prim("SnowEffect", 2, set_layer);
     prim("SnowEffect", 4, update);
     prim("SnowEffect", 5, animate(0, 1, false));
@@ -3381,7 +3580,7 @@ void install_graphics(VM& vm) {
 
     // PS Vita system image: ExtraPicture gained spin (13), which moves skip and pause to 14 and 15; the new
     // GalleryPicture has ExtraPicture's methods with the same numbers (docs/technical/vita-cpk-format.md).
-    if (g->vita) {
+    {
         prim("ExtraPicture", 13, spin);
         prim("ExtraPicture", 14, skip);
         prim("ExtraPicture", 15, pause);

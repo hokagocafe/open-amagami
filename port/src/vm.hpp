@@ -281,6 +281,9 @@ struct VM {
     std::string save_dir;  // empty: AMG_SAVE_DIR, else %APPDATA%\open-amagami\save (Windows) or ./save
     std::unordered_map<std::string, std::shared_ptr<ClassSource>> sources;
     std::unordered_map<std::string, std::shared_ptr<ClassObj>> classes;
+    ClassObj* builtin_cls_[10] = {};  // class_of by tag, found once (a name lookup per call was costly)
+    ClassObj* plain_array_cls_[3] = {};  // Array, ByteArray, UShortArray: their [] and atPut are the built-in ones
+    bool is_plain_array(const ArrObj* a);
     std::unordered_map<std::string, std::shared_ptr<SymObj>> symbols;
     std::vector<std::string> out;
     std::vector<std::unique_ptr<Thread>> threads;
@@ -309,6 +312,11 @@ struct VM {
     std::condition_variable cv;
     std::vector<std::tuple<int64_t, int64_t, int>> presses;  // first tick, last tick, button mask
     std::function<void(VM&)> on_tick;
+    int pointer_prev = 0;
+    int pointer_mask = 0;
+    bool mouse_shown = false;     // --mouse: the mouse has a place (for AMG_MOUSE_CURSOR_IN_SHOTS)
+    double mouse_at[2] = {0, 0};  // where, in script units from the middle of the picture  // what the headless mouse (--mouse) presses; the window has its own (menu_held)
+    std::function<void(VM&)> on_busy;  // every 65,536 instructions: a long stretch of script keeps the sound going
     std::map<int64_t, std::string> shots;  // frame -> file: save the screen when the clock reaches it
     std::function<void(VM&, const std::string&)> on_shot;
     Graphics* graphics = nullptr;
@@ -320,13 +328,9 @@ struct VM {
     // The Vita pad's auto-repeat (0x81001AEC): frames the same nonzero mask has been held, 0 to 20, then 21 to 24
     // and back to 20; `rapid` adds the held mask on every frame it is 20 (first repeat after 20 frames, then every 5).
     int rapid_count = 0, rapid_last = 0;
-    // The PS2's (func_00100A48, 0x100B10): the count goes up while the mask is unchanged (it is reset when it changes);
-    // at 21 `rapid` is the held mask and the count drops by 4. First repeat after 21 frames, then every 4.
-    int rapid_count_ps2 = 0;
-    bool rapid_fire_ps2 = false;
     int buttons_rapid(bool ps2_layout = false) const;
     // The analog sticks as the engine keeps them (func_00100A48): the pad's raw byte minus 128, no dead zone;
-    // 0 and 1 the right stick (horizontal, vertical), 2 and 3 the left one. 0 is the centre.
+    // 0 and 1 the left stick (horizontal, vertical), 2 and 3 the right one (the Vita's order; the PS2's was the other way). 0 is the centre.
     int analog[4] = {0, 0, 0, 0};
     int64_t analog_from = 0;  // the sticks read as centred before this tick (AMG_ANALOG's @TICK, tests)
 
@@ -399,6 +403,7 @@ struct VM {
 
     // calling
     Callable lookup(const Value& recv, int name_id, int argc);
+    const Callable* lookup_ptr(const Value& recv, int name_id, int argc);  // nullptr when there is none; valid for the run
     Value send(Thread& th, Value recv, const std::string& name, std::vector<Value> args);
     Value call(Value recv, const Callable& c, std::vector<Value> args, Thread* th);
     Value instantiate(ClassObj* cls, std::vector<Value> args, Thread* th);
@@ -415,7 +420,6 @@ struct VM {
     int buttons_pressed(bool ps2_layout = false) const;
     // The PS Vita system image reads the buttons in SceCtrl's layout (circle 0x2000, up 0x10, ...), which is the
     // PS2 engine's mask with its two bytes swapped; every input source of the port speaks the PS2's.
-    bool vita_buttons = false;
     int to_script_buttons(int ps2_mask) const;
 
     // loading
@@ -425,7 +429,7 @@ struct VM {
     // ControlPad.actuator(strength 0..255, on): the pad's rumble (the Settings screen tests it); null when there is no pad.
     std::function<void(double strength, bool on)> on_rumble;
     void load_sources();
-    void patch_config_page(ClassObj* cls);
+    void patch_main_menu(ClassObj* cls);
     void install_builtins();
 };
 
@@ -437,7 +441,6 @@ std::string describe(VM& vm, const Value& v);
 std::string lzss_unpack(const std::string& data);
 bool parse_scf(const std::string& data, size_t& pos, ClassSource& out);
 std::vector<std::shared_ptr<ClassSource>> read_image(const std::string& image);
-std::vector<std::string> read_arc(const std::string& data);
 std::string read_file(const std::string& path);
 
 // natives.cpp

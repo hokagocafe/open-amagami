@@ -1,0 +1,83 @@
+class "PortMain" : "K2X_Script" flags=0
+const class "Sound"
+const class "ControlPad"
+const class "PortDialog"
+const symbol "new"
+const symbol "playSE"
+const symbol "disable"
+const symbol "enable"
+const symbol "sleep"
+const symbol "open"
+const symbol "close"
+const symbol "trig"
+const symbol "rapid"
+const symbol "action"
+const symbol "changeTagL"
+const symbol "changeTagR"
+const symbol "moveCursorU"
+const symbol "moveCursorD"
+const symbol "selectValueL"
+const symbol "selectValueR"
+const symbol "setButtonGuide"
+const symbol "offButtonGuide"
+const symbol "destruct"
+; The port's own options screen, opened from the main menu's sixth entry (PortHooks.mainSelect) with the menu it came
+; from: the game's Settings screen (ConfigDialog, through PortDialog) with the port's tabs. Confirm on "Defaults" puts the
+; tab's rows back; L and R change the tab, up and down the row, left and right the value; cancel goes back.
+method "scriptMain" args=1 locals=4 {
+    Sound.playSE(50);
+    arg0.disable();
+    self.sleep(12);
+    loc0 = PortDialog.new().open();
+    self.sleep(9);
+    loc0.setButtonGuide();
+    self.sleep(3);
+    loc0.enable();
+    self.sleep(3);
+    while (true) {
+        loc1 = ControlPad.trig();
+        loc2 = ControlPad.rapid();
+        if (loc1 & 8192 != 0) {
+            loc0.action();
+        } else {
+            if (loc1 & 16384 != 0) {
+                break;
+            } else {
+                if (loc2 & 768 != 0) {
+                    if (loc2 & 256 != 0) {
+                        loc0.changeTagL();
+                    } else {
+                        loc0.changeTagR();
+                    }
+                } else {
+                    if (loc2 & 240 != 0) {
+                        if (loc2 & 16 != 0) {
+                            loc0.moveCursorU();
+                        } else {
+                            if (loc2 & 64 != 0) {
+                                loc0.moveCursorD();
+                            } else {
+                                if (loc2 & 128 != 0) {
+                                    loc0.selectValueL();
+                                } else {
+                                    if (loc2 & 32 != 0) {
+                                        loc0.selectValueR();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.sleep(1);
+    }
+    loc0.offButtonGuide();
+    loc0.disable();
+    self.sleep(6);
+    loc0.close();
+    self.sleep(9);
+    loc0.destruct();
+    arg0.enable();
+    self.sleep(6);
+}

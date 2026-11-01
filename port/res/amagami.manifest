@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Two settings that make folder names behave (docs/technical/port.md, "No dead ends"): the program's narrow strings are
+     UTF-8 (so a game folder with accents or Japanese letters in its name is read as it is written, whatever Windows' language),
+     and paths may be longer than 260 characters (where Windows has long paths turned on). -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <!-- The common controls 6: the launcher's tabs, buttons and lists in the look of Windows (visual styles). -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*"
+                        publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+    </windowsSettings>
+  </application>
+</assembly>

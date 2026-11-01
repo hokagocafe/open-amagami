@@ -7,3 +7,4 @@ e15d59f944cb62f88815491f5fa6169fc7fd89b7ddb660e3dc01f45143f63f6a eboot.bin PCSG0
 af3a7902c978d3cb6ad59a4a4c73977b2160034cb252817b74803a9f130a3c2a eboot_decrypted.elf PCSG00291, original Japanese, decrypted ELF (checked 2026-10-25)
 24c12ba0f5e14ee2f33a4bef104965d5e2b2e67d21ad6986322c6a316314bf87 AMAGAMI.IMG PCSG00291, original Japanese (checked 2026-10-25)
 e90928db30e495e60a07bfc27cfa486d1e0c131eea59d72bcbdfe492af83b645 SCENARIO.CPK PCSG00291, original Japanese (checked 2026-10-25)
+0f7aa54c38a6eccd2a81354d8af486a44c3ce9ce4c1b8198e97a29951aeeac89 eboot.bin PCSG00291 English fan patch v1.1 executable (not usable: the port needs the original game's)

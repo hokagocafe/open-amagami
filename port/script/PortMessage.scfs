@@ -1,0 +1,49 @@
+class "PortMessage" : "Object" flags=0
+const class "PortMessage"
+const class "ConfirmDialog"
+const class "ControlPad"
+const class "Sound"
+const symbol "printStatusForLoad"
+const symbol "printStatusForSave"
+const symbol "printStatus"
+const symbol "length"
+const symbol "fallback"
+const symbol "new"
+const symbol "show"
+const symbol "sleep"
+const symbol "waitOX"
+const symbol "playSE"
+const symbol "hide"
+const symbol "destruct"
+const float 0x00000000 ; 0.0
+; The card's message box: the console's system dialog (MemoryCard.displaySysMsg / waitSysMsgEnd, primitives 10 and 11),
+; which the port shows in the game's own look. Run in its own script thread by primitive 10 with the card and the
+; caller's kind (1 LoadMenu, 2 SaveMenu or SystemSave, 0 otherwise); the caller waits while it lives. The line is the
+; game's own (its message table, in the layer's language), with an OK button, until confirm or back, as the game's
+; own "loaded" and "saved" messages do.
+method "show" args=2 locals=4 {
+    if (arg1 == 1) {
+        loc2 = arg0.printStatusForLoad();
+    } else {
+        if (arg1 == 2) {
+            loc2 = arg0.printStatusForSave();
+        } else {
+            loc2 = arg0.printStatus();
+        }
+    }
+    if (loc2.length() == 0) {
+        loc2 = PortMessage.fallback(arg1);
+    }
+    if (loc2.length() == 0) {
+        return;
+    }
+    loc3 = ConfirmDialog.new(15, 0.0f, 0.0f, nil, loc2, 1);
+    loc3.show();
+    self.sleep(4);
+    ControlPad.waitOX();
+    Sound.playSE(46);
+    loc3.hide();
+    self.sleep(3);
+    loc3.destruct();
+    self.sleep(1);
+}

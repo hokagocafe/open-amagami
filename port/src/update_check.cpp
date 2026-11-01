@@ -25,11 +25,13 @@ bool parse(const std::string& tag, std::array<int, 3>& out) {
 const char* current() { return AMG_VERSION; }
 
 bool is_newer(const std::string& tag) {
+    if (std::getenv("AMG_UPDATE_TEST_TAG") && std::getenv("AMG_UPDATE_BASE")) return true;  // tests of the update itself
     std::array<int, 3> mine, theirs;
     return parse(current(), mine) && parse(tag, theirs) && theirs > mine;
 }
 
 std::string latest() {
+    if (const char* t = std::getenv("AMG_UPDATE_TEST_TAG")) return std::getenv("AMG_UPDATE_BASE") ? t : "";
     std::array<int, 3> mine;
     if (!parse(current(), mine)) return "";  // a dev build has nothing to compare
     std::string body;

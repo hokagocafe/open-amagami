@@ -1,0 +1,49 @@
+class "PortMenuEntry" : "Object" flags=0
+ivar 0 "back"
+ivar 1 "label"
+const class "Sprite"
+const class "TextLineC"
+const class "PortSettings"
+const symbol "new"
+const symbol "menuLabel"
+const symbol "pitch"
+const symbol "setText"
+const symbol "setAlpha"
+const symbol "setPos"
+const symbol "move"
+const symbol "fadeLight"
+const symbol "destruct"
+const float 0x00000000 ; 0.0
+; The port's entry of the main menu: what CommandMenu asks of an entry's Sprite (setAlpha, setPos, move, fadeLight,
+; destruct), done on a stroke of the game's (variant 1004: the stroke of the unused "Options" entry, its lettering painted
+; out by the port, Graphics::blank_stroke) and a label in the game's font and the layer's language on top.
+method "initialize" args=0 locals=0 {
+    self.back = Sprite.new(42, 1004, 10).setAlpha(0.0f);
+    self.label = TextLineC.new(11, 0.0f, 0.0f, PortSettings.pitch() - 1, 0, 1);
+    self.label.setText(PortSettings.menuLabel());
+    self.label.setAlpha(0.0f);
+}
+method "setAlpha" args=1 locals=0 {
+    self.back.setAlpha(arg0);
+    self.label.setAlpha(arg0);
+    return self;
+}
+method "setPos" args=2 locals=0 {
+    self.back.setPos(arg0, arg1);
+    self.label.setPos(arg0, arg1);
+    return self;
+}
+method "move" args=4 locals=0 {
+    self.back.move(arg0, arg1, arg2, arg3);
+    self.label.move(arg0, arg1, arg2, arg3);
+    return self;
+}
+method "fadeLight" args=5 locals=0 {
+    self.back.fadeLight(arg0, arg1, arg2, arg3, arg4);
+    self.label.fadeLight(arg0, arg3, arg4);
+    return self;
+}
+method "destruct" args=0 locals=0 {
+    self.back.destruct();
+    self.label.destruct();
+}

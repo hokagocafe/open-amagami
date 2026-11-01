@@ -1,0 +1,211 @@
+class "PortMouse" : "Object" flags=0
+const class "PortMouse"
+const class "Sound"
+const class "PortSettings"
+const symbol "playSE"
+const symbol "moveCursor"
+const symbol "mirror"
+const symbol "field"
+const symbol "setField"
+const symbol "setButtonGuide"
+const symbol "selectValueL"
+const symbol "selectValueR"
+const symbol "getItems"
+const symbol "left"
+const symbol "right"
+const symbol "perform"
+const symbol "changeTag"
+const symbol "changeTagL"
+const symbol "changeTagR"
+const symbol "openPage"
+const symbol "moveCursorU"
+const symbol "moveCursorD"
+const symbol "row"
+const symbol "getVolumeMusic"
+const symbol "getVolumeVoice"
+const symbol "getVolumeSound"
+const symbol "getVolumeSysSE"
+const symbol "getMessSpeed"
+const symbol "getAutoWait"
+const symbol "getMjSpeed"
+const class "ShioriData"
+const class "K2X_Script"
+const symbol "getNum"
+const symbol "setNum"
+const symbol "setDay"
+const symbol "get"
+const symbol "getDate"
+const symbol "getTime"
+const symbol "set"
+const symbol "change"
+const symbol "getMapParam"
+const symbol "disable"
+const symbol "enable"
+const symbol "setScrGuide"
+const symbol "up"
+const symbol "down"
+const symbol "shioriAfter"
+const symbol "setCursor"
+const symbol "move"
+const symbol "focas"
+const symbol "setMissTens"
+const float 0x40400000 ; 3.0
+const float 0x40c00000 ; 6.0
+; The native mouse (docs/technical/mouse-native-design.md, src/mouse_menus.hpp): run in its own short script thread when
+; the entry under the mouse changes. It does what the owner's loop does for one pad move, but to the entry in one step:
+; the owner's move sound, the menu's own direct move (CommandMenu.moveCursor sets nextCurY and the move state, which
+; the menu's thread animates as for a pad move), and the owner's copy of the index (PortMouse.mirror, a native).
+method "select" args=3 locals=1 {
+    Sound.playSE(arg2);
+    loc0 = arg0.moveCursor(arg1);
+    PortMouse.mirror(loc0);
+}
+; The Settings screen (ConfigDialog, and the port's PortDialog): row arg1 selected, as ConfigDialog.moveCursorU does
+; for one row (sound 31, the page's last row, the button guide, the cursor's move state).
+method "row" args=2 locals=1 {
+    Sound.playSE(31);
+    PortSettings.setField(arg0, "curY", arg1);
+    loc0 = PortSettings.field(arg0, "clast");
+    loc0[PortSettings.field(arg0, "page")] = arg1;
+    arg0.setButtonGuide();
+    PortSettings.setField(arg0, "stateNext", 3);
+}
+; A text value of row arg1 one step back (arg2 < 0) or forward: the dialog's own selectValueL/R on that row.
+method "step" args=3 locals=0 {
+    if (PortSettings.field(arg0, "curY") != arg1) {
+        self.row(arg0, arg1);
+    }
+    if (arg2 < 0) {
+        arg0.selectValueL();
+    } else {
+        arg0.selectValueR();
+    }
+}
+; A volume row (ConfigVolume) to value arg2: its own left/right as many times as needed, one sound (21) for all.
+method "volume" args=3 locals=2 {
+    if (PortSettings.field(arg0, "curY") != arg1) {
+        self.row(arg0, arg1);
+    }
+    loc0 = PortSettings.field(arg0, "pageList")[PortSettings.field(arg0, "page")].getItems()[arg1];
+    loc1 = loc0.perform([#getVolumeMusic, #getVolumeVoice, #getVolumeSound, #getVolumeSysSE][PortSettings.field(loc0, "kind")]);
+    if (loc1 == arg2) {
+        return;
+    }
+    while (loc1 < arg2) {
+        loc0.right();
+        loc1 = loc1 + 1;
+    }
+    while (loc1 > arg2) {
+        loc0.left();
+        loc1 = loc1 - 1;
+    }
+    Sound.playSE(21);
+}
+; A speed row (ConfigSpeed) to value arg2, the same way.
+method "speed" args=3 locals=2 {
+    if (PortSettings.field(arg0, "curY") != arg1) {
+        self.row(arg0, arg1);
+    }
+    loc0 = PortSettings.field(arg0, "pageList")[PortSettings.field(arg0, "page")].getItems()[arg1];
+    loc1 = loc0.perform([#getMessSpeed, #getAutoWait, #getMjSpeed][PortSettings.field(loc0, "kind")]);
+    if (loc1 == arg2) {
+        return;
+    }
+    while (loc1 < arg2) {
+        loc0.right();
+        loc1 = loc1 + 1;
+    }
+    while (loc1 > arg2) {
+        loc0.left();
+        loc1 = loc1 - 1;
+    }
+    Sound.playSE(21);
+}
+; A tab: arg1 its index (the dialog's changeTag), -1 the one to the left, 100 the one to the right.
+method "tab" args=2 locals=0 {
+    if (arg1 < 0) {
+        arg0.changeTagL();
+    } else {
+        if (arg1 >= 100) {
+            arg0.changeTagR();
+        } else {
+            arg0.changeTag(arg1);
+        }
+    }
+}
+; The name entry (NameEntry arg0): category arg1, as its loop does for up or down (sound 32, the menu's index into the
+; owner's curY, the grid's page).
+method "category" args=2 locals=0 {
+    Sound.playSE(32);
+    PortSettings.setField(arg0, "curY", PortSettings.field(arg0, "menu").moveCursor(arg1));
+    PortSettings.field(arg0, "list").openPage(PortSettings.field(arg0, "curY"));
+}
+; The grid (NameEntryList arg0): the cursor to column arg1 of shown row arg2, as moveCursorL/R/U/D end (sound 31).
+method "cell" args=3 locals=0 {
+    Sound.playSE(31);
+    PortSettings.setField(arg0, "curX", arg1);
+    PortSettings.setField(arg0, "curY", arg2);
+    arg0.moveCursor(3.0f);
+}
+; The grid a row up (arg1 < 0) or down, scrolling at the ends: its own moveCursorU/D.
+method "scroll" args=2 locals=0 {
+    Sound.playSE(31);
+    if (arg1 < 0) {
+        arg0.moveCursorU();
+    } else {
+        arg0.moveCursorD();
+    }
+}
+; A choice (Selector arg0): its cursor to column arg1, row arg2, as Selector.waitSelect does for one pad move (sound 31,
+; the lit bar slides there in 6 frames).
+method "choice" args=3 locals=0 {
+    arg0.setCursor(arg1, arg2);
+    Sound.playSE(31);
+    PortSettings.field(arg0, "spr").move(PortSettings.field(arg0, "orgX") + PortSettings.field(arg0, "pitchX") * PortSettings.field(arg0, "curX"), PortSettings.field(arg0, "orgY") + PortSettings.field(arg0, "pitchY") * PortSettings.field(arg0, "curY"), 1, 6.0f);
+}
+; The conversation's topics (WadaiPanel arg0, WadaiTargetSet arg1): topic arg2, as KaiwaMain.wadaiSelect and
+; WadaiPanel.moveCursor do for one pad move (sound 32, the focus, the target set's misses).
+method "topic" args=3 locals=0 {
+    Sound.playSE(32);
+    PortSettings.field(arg0, "wicon")[PortSettings.field(arg0, "wadai")].focas(false);
+    PortSettings.setField(arg0, "wadai", arg2);
+    PortSettings.field(arg0, "wicon")[arg2].focas(true);
+    arg1.setMissTens(arg2);
+}
+; Load / Save (ShioriList arg0, the owner's FavorGraph arg1 and TimeIcon arg2): what the owner's loop does after a move
+; to slot number arg3 (sound 32, the slot number kept, the calendar's day, the time icon, the favour graph).
+method "shioriAfter" args=4 locals=0 {
+    if (ShioriData.getNum() != arg3) {
+        Sound.playSE(32);
+        ShioriData.setNum(arg3);
+        K2X_Script.cvar5.setDay(ShioriData.get().getDate(), 6.0f);
+        arg2.set(ShioriData.get().getDate(), ShioriData.get().getTime());
+        arg1.change(ShioriData.get().getMapParam());
+    }
+}
+; Shown slot arg3 selected in one step, as ScrollList.up/down do for one (the old slot dimmed, the new lit, the guide).
+method "shiori" args=4 locals=1 {
+    loc0 = PortSettings.field(arg0, "list");
+    loc0[PortSettings.field(arg0, "pos") + PortSettings.field(arg0, "cur")].disable();
+    PortSettings.setField(arg0, "cur", arg3);
+    loc0[PortSettings.field(arg0, "pos") + arg3].enable();
+    arg0.setScrGuide();
+    self.shioriAfter(arg0, arg1, arg2, PortSettings.field(arg0, "pos") + arg3);
+}
+; One slot up (arg3 < 0) or down: the list's own up/down (they scroll at the ends), then the owner's part.
+method "shioriStep" args=4 locals=1 {
+    if (arg3 < 0) {
+        loc0 = arg0.up();
+    } else {
+        loc0 = arg0.down();
+    }
+    self.shioriAfter(arg0, arg1, arg2, loc0);
+}
+; The name field: its cursor to place arg1 (0 Back, 1 to 6 a character, 7 Decide) and the owner's copy, as L and R
+; do (sound 33 on a character); on 0 or 7 the owner's loop then asks its question.
+method "name" args=2 locals=0 {
+    PortSettings.setField(arg0, "curX", PortSettings.field(arg0, "edit").moveCursor(arg1));
+    if (arg1 > 0 and arg1 < 7) {
+        Sound.playSE(33);
+    }
+}

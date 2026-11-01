@@ -18,10 +18,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 32-bit MSVC environment
+      - name: 64-bit MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x86
+          arch: x64
 
       - name: Configure
         run: cmake -S port -B build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DAMG_VERSION=${{ github.ref_name }}"  # quoted: PowerShell splits an unquoted v0.1.4 at the dot
@@ -39,15 +39,15 @@ jobs:
           Copy-Item README.md, LICENSE, NOTICE.md $dir
           Copy-Item how-to-play.txt "$dir/How to play.txt"
           Copy-Item licenses $dir -Recurse
-          Compress-Archive -Path $dir -DestinationPath open-amagami-windows-x86.zip
-          $hash = (Get-FileHash open-amagami-windows-x86.zip -Algorithm SHA256).Hash.ToLower()
-          "$hash  open-amagami-windows-x86.zip" | Out-File SHA256SUMS.txt -Encoding ascii
+          Compress-Archive -Path $dir -DestinationPath open-amagami-windows-x64.zip
+          $hash = (Get-FileHash open-amagami-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  open-amagami-windows-x64.zip" | Out-File SHA256SUMS.txt -Encoding ascii
 
       - uses: actions/upload-artifact@v4
         with:
-          name: open-amagami-windows-x86
+          name: open-amagami-windows-x64
           path: |
-            open-amagami-windows-x86.zip
+            open-amagami-windows-x64.zip
             SHA256SUMS.txt
 
       - name: Release
@@ -58,4 +58,4 @@ jobs:
         run: |
           # The players' text first (download, three steps), then GitHub's list of changes.
           (Get-Content .github/release-notes.md -Raw).Replace('TAG', '${{ github.ref_name }}') | Out-File notes.md -Encoding utf8
-          gh release create "${{ github.ref_name }}" open-amagami-windows-x86.zip SHA256SUMS.txt --title "open-amagami ${{ github.ref_name }}" --notes-file notes.md --generate-notes
+          gh release create "${{ github.ref_name }}" open-amagami-windows-x64.zip SHA256SUMS.txt --title "open-amagami ${{ github.ref_name }}" --notes-file notes.md --generate-notes

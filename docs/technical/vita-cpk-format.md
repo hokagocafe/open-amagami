@@ -192,7 +192,7 @@ The port's own code also names some ids, taken from the PS2 engine. `Graphics::e
 | Light ball | 209 | 202 | `0x8100BA6A` |
 | Map | 201 | 194 | `0x8100CA2E`, under `NodeMapNaviBase` |
 | Balloon | 240/241 | 215 | `0x8100B2C4` |
-| Cut-in frame and texture | 320/319 | 321/322 | by picture only (hypothesis) |
+| Cut-in frame and texture | 320/319 | 321/322 | `0x8100AE44` (`movw #0x141`, `#0x142`), confirmed from code |
 
 **PS2 constant tables.** The PS2 tables the port reads (clock and map icons) were found in the eboot. The clock tables are byte-identical; the map-icon tables hold Vita ids. `Graphics::exe_word` maps each PS2 address to its Vita counterpart.
 

@@ -17,6 +17,10 @@ struct Check {
 // (the images and scripts, the executable), so this takes a moment: call it away from the window's thread.
 std::vector<Check> check_data(const std::string& root);
 
+// Whether the three data files are whole (not cut short, not damaged), as a message for the player ("" when they are). Reads the
+// small file and the tables of the two archives: a moment, so not on the window's thread when it can be avoided.
+std::string damaged_files(const std::string& root);
+
 // The label of `path` in the table of known versions as the file `name` ("AMAGAMI.IMG"), or "" if it is not there.
 std::string known_label(const std::string& path, const std::string& name);
 

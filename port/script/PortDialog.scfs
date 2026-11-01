@@ -1,0 +1,56 @@
+class "PortDialog" : "ConfigDialog" flags=0
+const class "PortSettings"
+const class "PortSwitch"
+const class "PortPage"
+const class "ConfigPage"
+const class "Vector"
+const class "Array"
+const symbol "new"
+const symbol "initialize"
+const symbol "field"
+const symbol "setField"
+const symbol "length"
+const symbol "destruct"
+const symbol "init"
+const symbol "put"
+const symbol "tabs"
+const symbol "tabRows"
+const symbol "tabRow"
+const float 0xc2980000 ; -76.0
+const float 0x41900000 ; 18.0
+; The game's Settings screen with the port's pages: the game's own ConfigDialog is built as usual (panel, tab bar,
+; "Defaults", button guides, cursor, in the layer's own look), then its pages are dropped and the port's put in their
+; place, one tab per group of PortSettings with its rows at the game's pitch. No instance variables of our own (the
+; parent's slots are reached by name, PortSettings.field).
+method "initialize" args=0 locals=6 {
+    super.initialize();
+    loc0 = PortSettings.field(self, "pageList");
+    loc1 = 0;
+    while (loc1 < loc0.length()) {
+        loc0[loc1].destruct();
+        loc1 = loc1 + 1;
+    }
+    ConfigPage.init();
+    loc0 = Vector.new(4);
+    loc1 = 0;
+    while (loc1 < PortSettings.tabs()) {
+        loc2 = Vector.new(8);
+        loc3 = -76.0f;
+        loc4 = 0;
+        while (loc4 < PortSettings.tabRows(loc1)) {
+            loc2.put(PortSwitch.new(PortSettings.tabRow(loc1, loc4), loc3));
+            loc3 = loc3 + 18.0f;
+            loc4 = loc4 + 1;
+        }
+        loc0.put(PortPage.new(loc1, loc2));
+        loc1 = loc1 + 1;
+    }
+    PortSettings.setField(self, "pageList", loc0);
+    loc5 = Array.new(loc0.length());
+    loc1 = 0;
+    while (loc1 < loc5.length()) {
+        loc5[loc1] = 0;
+        loc1 = loc1 + 1;
+    }
+    PortSettings.setField(self, "clast", loc5);
+}

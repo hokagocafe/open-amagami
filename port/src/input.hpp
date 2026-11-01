@@ -24,6 +24,13 @@ struct Settings {
 // generic: attaches a virtual pad of that kind, to test without hardware.
 bool init(const Settings& settings, const std::string& fake = "");
 void shutdown();
+// A pad SDL does not know is added with a line of SDL's mapping database (as the community tools write them). The lines
+// are kept in gamecontrollerdb.txt in the folder of config.ini and read at the next start, with the one beside the program.
+std::string pad_database_file();
+// Checks the lines of `text` (blank lines and # comments are skipped) and appends the new ones to that file. Returns how
+// many were added; -1 with `error` set (and nothing written) if a line is not a mapping.
+int save_pad_mappings(const std::string& text, std::string& error);
+
 // Changes the settings while running (the game's Settings screen, F5-11).
 void set_settings(const Settings& settings);
 Settings settings();
@@ -56,7 +63,20 @@ struct GameButton {
     int default_key;        // a Windows virtual-key code
 };
 const GameButton* game_buttons(int* count);  // in the order the rebinding window lists them
-void load_keys(const std::function<std::string(const std::string&)>& read);  // read(name) gives config.ini's value
+void load_keys(const std::function<std::string(const std::string&)>& read);
+
+// The pad's buttons (F5-14): each game button reads one of the pad's own buttons or triggers, `source` an index in the list
+// below, or -1 for the automatic one (the d-pad, the face buttons by position, the shoulders, the triggers, start and back).
+// config.ini: pad_<button name>=<source name>.
+int pad_source_count();
+const char* pad_source_name(int source);
+const char* pad_source_label(int source);
+int pad_source(int button);  // `button` indexes game_buttons()
+void set_pad_source(int button, int source);
+void load_pad_buttons(const std::function<std::string(const std::string&)>& read);
+bool active();       // SDL's gamepads are started
+// For the rebinding window: the first source pressed since the last call (any pad), or -1. Call once to start from what is held.
+int take_pad_press();  // read(name) gives config.ini's value
 int key_of(int mask_bit);                    // the key bound to a game button now
 bool reserved_key(int virtual_key);          // the window's own keys (Esc, F9, F10, F11): never bound
 KeyLabel label_of_key(int virtual_key);      // what a key's picture shows

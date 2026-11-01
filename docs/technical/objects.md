@@ -272,15 +272,9 @@ screen = (0, −30) + scale × (p + position + shift − (0, −30))
 
 `setDrawTarget` attaches a character to another object, which then supplies position, scale and opacity, and clips the canvas to what that object shows. The code has been read but is not modelled; the scripts seen so far pass no target.
 
-## Snow (partly understood; the model's version is an approximation)
+## Snow (read on the Vita 2026-10-26)
 
-`SnowEffect` is `K2R_CObjSnow` with one `K2R_CObjSnowFlake` per flake.
-
-- **Script side (confirmed).** `initialize(variant, count)` picks one of four presets: the flake mode (1 or 2), the count, four distances or speeds (for instance 10000, 8000, 1000, 8000), a size of 0.18 or 0.3, a camera direction and a camera position. `setAmount(amount, time)` changes how many flakes are alive, `fade(alpha, mode, time)` fades them all, and `turnCam` and `moveCam` tween a camera, like any other position. `isFade`, `isMove` and `isTrun` poll the three tweens.
-- **Engine side (confirmed structure, not read in detail).** The snow manager builds a camera matrix from the direction and position every frame, projects each flake from 3D, and spawns new flakes with the game's own random-number function (`0x168F40`), so the exact flake positions depend on the random state.
-- **Model (approximation).** `SnowObject` in `tools/hokago.py scfvm_gfx` draws a fixed set of small white squares that fall and sway, with the count and fade taken from the script. Nothing about their motion is claimed to match the game.
-
-Because only the polling (`isFade` and friends) can affect a script, the approximation is enough for the reference model. The port will need the real thing, read from `0x1A3430` (snow step) and `0x1A5D48` (flake step).
+`SnowEffect` is `K2R_CObjSnow` with one `K2R_CObjSnowFlake` per flake. The script side is the presets of `SnowEffect.scfs` (`initialize(mode, count, d1, d2, d3, d4, size)` plus `setCamDir` and `setCamPos`; `setAmount(count, time)`; `fade(alpha, mode, time)`; `isFade`, `isMove` and `isTrun` poll the three tweens). The engine side (flakes in a 3D box in front of a camera, the projection, the fades and the death at the ground) is written in [vita-executable.md](vita-executable.md), "Snow". The port follows it; the flake's picture is a guess. The PS2's functions (`0x1A3430`, `0x1A5D48`) were never read.
 
 ## Copies and weekday names (confirmed)
 

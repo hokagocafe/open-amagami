@@ -1,0 +1,11 @@
+class "PortPage" : "ConfigPage" flags=0
+const class "PortSettings"
+const symbol "initialize"
+const symbol "field"
+const symbol "setText"
+const symbol "tabTitle"
+; A page of the port's screen: the game's ConfigPage (its tab, in the layer's look) with the tab's title the port's.
+method "initialize" args=2 locals=0 {
+    super.initialize(arg0, arg1);
+    PortSettings.field(self, "tagText").setText(PortSettings.tabTitle(arg0));
+}

@@ -12,7 +12,7 @@ scripts, no saves of other people. If something would help only with a game file
 
 ## Code
 
-- Windows 32-bit, MSVC, C++17. The build is in the README.
+- Windows 64-bit, MSVC, C++17. The build is in the README.
 - Keep to the style of the file you are in: comments say why, names are plain, no clever macros.
 - A change should say how it was checked. The notes in `docs/` say what is known and how sure we are.
 - Everything in the repository is in English.

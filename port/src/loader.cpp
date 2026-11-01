@@ -163,20 +163,4 @@ std::vector<std::shared_ptr<ClassSource>> read_image(const std::string& image) {
     return out;
 }
 
-// ARC: n, data offset, n u16 counts, n u16 firsts, then n entries of (flag, hash, offset, size).
-// Returns the entries' data in the order it is stored.
-std::vector<std::string> read_arc(const std::string& data) {
-    size_t n = le32(data, 0);
-    size_t table = 8 + 4 * n;
-    struct E {
-        uint32_t off, size;
-    };
-    std::vector<E> entries;
-    for (size_t i = 0; i < n; ++i) entries.push_back({le32(data, table + 16 * i + 8), le32(data, table + 16 * i + 12)});
-    std::sort(entries.begin(), entries.end(), [](const E& a, const E& b) { return a.off < b.off; });
-    std::vector<std::string> out;
-    for (const E& e : entries) out.push_back(data.substr(e.off, e.size));
-    return out;
-}
-
 }  // namespace amg

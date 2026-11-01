@@ -13,6 +13,7 @@
 
 #include "datapath.hpp"
 #include "paths.hpp"
+#include "ui_text.hpp"
 
 namespace amg {
 
@@ -70,11 +71,11 @@ struct Progress {
 
 LRESULT CALLBACK progress_proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
     if (msg == WM_CLOSE) {
-        auto* p = reinterpret_cast<Progress*>(GetWindowLongPtrA(hwnd, GWLP_USERDATA));
+        auto* p = reinterpret_cast<Progress*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         if (p) p->cancelled = true;
         return 0;
     }
-    return DefWindowProcA(hwnd, msg, w, l);
+    return DefWindowProcW(hwnd, msg, w, l);
 }
 
 void pump() {
@@ -88,12 +89,11 @@ void pump() {
 void show(Progress& p, uint64_t done, uint64_t total, const std::string& what) {
     int percent = total ? int(done * 100 / total) : 100;
     SendMessage(p.bar, PBM_SETPOS, WPARAM(percent), 0);
-    char text[300];
-    std::snprintf(text, sizeof text, "%s\n%.2f of %.2f GB", what.c_str(), double(done) / 1e9, double(total) / 1e9);
-    SetWindowTextA(p.label, text);
-    char title[80];
-    std::snprintf(title, sizeof title, "Amagami: importing the game, %d %%", percent);
-    SetWindowTextA(p.window, title);
+    char got[32], of[32];
+    std::snprintf(got, sizeof got, "%.2f", double(done) / 1e9);
+    std::snprintf(of, sizeof of, "%.2f", double(total) / 1e9);
+    SetWindowTextW(p.label, ui::wfmt("{0}\n{1} of {2} GB", {what, got, of}).c_str());
+    SetWindowTextW(p.window, ui::wfmt("Amagami: importing the game, {0} %", {std::to_string(percent)}).c_str());
     pump();
 }
 
@@ -117,24 +117,24 @@ std::string import_game(const std::string& src, const std::string& dst) {
     fs::create_directories(dst, ec);
     ULARGE_INTEGER free_bytes = {};
     if (GetDiskFreeSpaceExA(dst.c_str(), &free_bytes, nullptr, nullptr) && free_bytes.QuadPart < total + (200ull << 20))
-        return "There is not enough free space for the game's files (about " + std::to_string(total / 1000000000ull + 1) +
-               " GB needed) in " + dst + ".";
+        return ui::fmt("There is not enough free space for the game's files (about {0} GB needed) in {1}.",
+                       {std::to_string(total / 1000000000ull + 1), dst});
 
     INITCOMMONCONTROLSEX icc = {sizeof icc, ICC_PROGRESS_CLASS};
     InitCommonControlsEx(&icc);
-    WNDCLASSA wc = {};
+    WNDCLASSW wc = {};
     wc.lpfnWndProc = progress_proc;
-    wc.hInstance = GetModuleHandleA(nullptr);
+    wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
-    wc.lpszClassName = "AmagamiImport";
-    RegisterClassA(&wc);
+    wc.lpszClassName = L"AmagamiImport";
+    RegisterClassW(&wc);
     Progress p;
-    p.window = CreateWindowA("AmagamiImport", "Amagami: importing the game", WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
+    p.window = CreateWindowW(L"AmagamiImport", ui::wtr("Amagami: importing the game").c_str(), WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
                              CW_USEDEFAULT, CW_USEDEFAULT, 520, 150, nullptr, nullptr, wc.hInstance, nullptr);
-    p.label = CreateWindowA("STATIC", "", WS_CHILD | WS_VISIBLE, 16, 12, 480, 40, p.window, nullptr, wc.hInstance, nullptr);
-    p.bar = CreateWindowA(PROGRESS_CLASSA, "", WS_CHILD | WS_VISIBLE, 16, 62, 470, 22, p.window, nullptr, wc.hInstance, nullptr);
-    SetWindowLongPtrA(p.window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&p));
+    p.label = CreateWindowW(L"STATIC", L"", WS_CHILD | WS_VISIBLE, 16, 12, 480, 40, p.window, nullptr, wc.hInstance, nullptr);
+    p.bar = CreateWindowW(PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE, 16, 62, 470, 22, p.window, nullptr, wc.hInstance, nullptr);
+    SetWindowLongPtrW(p.window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&p));
 
     std::string result;
     uint64_t done = 0;
@@ -144,13 +144,13 @@ std::string import_game(const std::string& src, const std::string& dst) {
         fs::create_directories(fs::path(target).parent_path(), ec);
         if (fs::exists(target, ec) && uint64_t(fs::file_size(target, ec)) == it.size) {  // already imported
             done += it.size;
-            show(p, done, total, it.to + " (already there)");
+            show(p, done, total, it.to + ui::tr(" (already there)"));
             continue;
         }
         std::ifstream in(it.from, std::ios::binary);
         std::ofstream out(target + ".part", std::ios::binary | std::ios::trunc);
         if (!in || !out) {
-            result = "Could not copy " + it.to + ".";
+            result = ui::fmt("Could not copy {0}. Check that your folder can be read and that the disk has room, then try again.", {it.to});
             break;
         }
         uint64_t left = it.size;
@@ -158,19 +158,19 @@ std::string import_game(const std::string& src, const std::string& dst) {
             size_t n = size_t(std::min<uint64_t>(left, buffer.size()));
             in.read(buffer.data(), std::streamsize(n));
             if (size_t(in.gcount()) != n) {
-                result = "Could not read " + it.to + " from your copy.";
+                result = ui::fmt("Could not read {0} from your copy. If the copy is damaged, copy the game's files again.", {it.to});
                 break;
             }
             out.write(buffer.data(), std::streamsize(n));
             if (!out) {
-                result = "Could not write " + it.to + " (is the disk full?).";
+                result = ui::fmt("Could not write {0} (is the disk full?).", {it.to});
                 break;
             }
             left -= n;
             done += n;
             show(p, done, total, it.to);
             if (p.cancelled) {
-                result = "Cancelled.";
+                result = ui::tr("Cancelled.");
                 break;
             }
         }
@@ -182,7 +182,7 @@ std::string import_game(const std::string& src, const std::string& dst) {
         }
         fs::rename(target + ".part", target, ec);
         if (ec) {
-            result = "Could not finish " + it.to + ".";
+            result = ui::fmt("Could not finish {0}. Check that the disk has room and that no other program is using the folder, then try again.", {it.to});
             break;
         }
     }

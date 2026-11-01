@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "paths.hpp"
+#include "ui_text.hpp"
 #include "third_party/stb/stb_image.h"
 
 namespace amg::shortcut {
@@ -102,7 +103,7 @@ HICON load_game_icon(const std::string& root, int size) {
 std::string create(const std::string& root) {
     wchar_t exe[MAX_PATH];
     const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    if (n == 0 || n == MAX_PATH) return "The program's own path could not be read.";
+    if (n == 0 || n == MAX_PATH) return ui::tr("The program's own path could not be read.");
     std::wstring dir(exe);
     dir = dir.substr(0, dir.find_last_of(L"\\/"));
     const std::string icon_file = game_icon_file(root);
@@ -110,8 +111,8 @@ std::string create(const std::string& root) {
     const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     std::string failed;
     const std::wstring desktop = known_folder(FOLDERID_Desktop), programs = known_folder(FOLDERID_Programs);
-    if (desktop.empty() || !write_link(desktop + L"\\Amagami.lnk", exe, dir, icon)) failed += "The desktop shortcut could not be made. ";
-    if (programs.empty() || !write_link(programs + L"\\Amagami.lnk", exe, dir, icon)) failed += "The Start menu shortcut could not be made.";
+    if (desktop.empty() || !write_link(desktop + L"\\Amagami.lnk", exe, dir, icon)) failed += ui::tr("The desktop shortcut could not be made.") + " ";
+    if (programs.empty() || !write_link(programs + L"\\Amagami.lnk", exe, dir, icon)) failed += ui::tr("The Start menu shortcut could not be made.");
     if (SUCCEEDED(co)) CoUninitialize();
     return failed;
 }
@@ -153,12 +154,11 @@ void refresh(const std::string& root) {
 void offer_once(const std::string& root, bool asked, void (*mark_asked)()) {
     if (asked || paths::portable()) return;
     mark_asked();
-    if (MessageBoxW(nullptr, L"Put a shortcut to Amagami on the desktop and in the Start menu?\n\n"
-                             L"You can also make them later in Settings.",
+    if (MessageBoxW(nullptr, ui::wtr("Put a shortcut to Amagami on the desktop and in the Start menu?\n\nYou can also make them later in General, Desktop shortcut.").c_str(),
                     L"Amagami", MB_YESNO | MB_ICONQUESTION) != IDYES)
         return;
     const std::string failed = create(root);
-    if (!failed.empty()) MessageBoxA(nullptr, failed.c_str(), "Amagami", MB_OK | MB_ICONWARNING);
+    if (!failed.empty()) MessageBoxW(nullptr, ui::wide(failed).c_str(), L"Amagami", MB_OK | MB_ICONWARNING);
 }
 
 }  // namespace amg::shortcut
