@@ -119,6 +119,11 @@ bool game_arrow(int size, Art& out) {
 
 }  // namespace
 
+bool has_source() {
+    std::lock_guard<std::mutex> lk(source_mutex);
+    return !src_px.empty();
+}
+
 bool set_source(int w, int h, const uint8_t* rgba) {
     if (w <= 0 || h <= 0 || !rgba) return false;
     std::lock_guard<std::mutex> lk(source_mutex);

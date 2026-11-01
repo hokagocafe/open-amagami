@@ -14,6 +14,8 @@ int size_for(int view_h);
 // The game's arrow as read from the data: `w` by `h` RGBA with the PS2's alpha (0..128), pointing right. Any thread;
 // a copy is kept. Returns true when it is new (the window then makes its cursor again).
 bool set_source(int w, int h, const uint8_t* rgba);
+// Whether the game's arrow has been read yet (until then the window shows no cursor rather than a stand-in).
+bool has_source();
 // The cursor, `size` by `size` RGBA (straight alpha), and its hot spot (the tip).
 struct Art {
     int size = 0, hot_x = 1, hot_y = 1;

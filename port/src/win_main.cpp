@@ -232,6 +232,7 @@ void show_cursor(HWND hwnd, bool on) {
 
 // The arrow at the size of the picture in the window (cursor_art.hpp); made again when the window changes size.
 void make_cursor(HWND hwnd, const Viewport& view) {
+    if (!amg::cursor_art::has_source()) return;  // no stand-in arrow: the game's own one or none
     const int size = amg::cursor_art::size_for(view.height);
     if (size == g_cursor_size && g_cursor) return;
     const amg::cursor_art::Art art_made = amg::cursor_art::make(size);
@@ -348,7 +349,7 @@ LRESULT CALLBACK proc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         }
         case WM_SETCURSOR:
             if (LOWORD(l) == HTCLIENT) {
-                SetCursor(g_cursor_shown ? (g_cursor ? g_cursor : LoadCursor(nullptr, IDC_ARROW)) : nullptr);
+                SetCursor(g_cursor_shown ? g_cursor : nullptr);  // none until the game's arrow is read
                 return TRUE;
             }
             break;

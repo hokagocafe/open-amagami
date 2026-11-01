@@ -369,6 +369,8 @@ bool MouseMenus::update(VM& vm, const Scene& seen, double mx, double my, bool in
         for (size_t i = 0; i < items.size() && int64_t(i) < n; ++i) {
             if (items[i].tag != Tag::Obj) continue;
             const auto* o = static_cast<ObjObj*>(items[i].p.get());
+            // The port's own entry (PortMenuEntry) holds its stroke as a Sprite in its first field.
+            if (!o->iv.empty() && o->iv[0].tag == Tag::Obj) o = static_cast<ObjObj*>(o->iv[0].p.get());
             if (o->iv.empty() || o->iv[0].tag != Tag::Int) continue;
             auto it = by_uid.find(o->iv[0].i);
             if (it == by_uid.end()) continue;

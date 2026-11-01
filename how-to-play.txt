@@ -27,7 +27,8 @@ ENGLISH
 
 CONTROLS
   A gamepad works when plugged in. The mouse works like the game's own cursor (hover lights
-  an entry, click chooses, right click goes back, the wheel moves): title, menus,
+  an entry, click chooses, right click goes back, the wheel moves): title, menus (including
+  the main-menu "Port options" entry),
   Settings, name entry, day map, gallery.
   Keyboard: Z confirm, X cancel, arrows move, Enter start, Backspace select,
             A square, S triangle, Q/W L/R, E/R L2/R2.

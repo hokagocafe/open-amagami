@@ -75,7 +75,7 @@ back in **Game files → Language** at any time.
 
 A gamepad (PlayStation, Xbox and most others) works as soon as it is plugged in, and the button pictures in the game follow the pad
 you use. The mouse works like the game's own cursor: hover an entry and it lights at once, click chooses, right click goes back, the wheel moves
-entry by entry. It works on the title, in every menu, in the Settings screen (rows, sliders, tabs), in the name entry, on the day map
+entry by entry. It works on the title, in every menu (including the main-menu Port options entry), in the Settings screen (rows, sliders, tabs), in the name entry, on the day map
 and in the gallery, and the game's own arrow is the pointer. On the keyboard:
 
 | Game button | Key | | Game button | Key |
