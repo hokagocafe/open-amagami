@@ -1177,15 +1177,16 @@ std::string Graphics::exe_string(uint32_t address) const {
 // is an entry of sysgraph.tm2; a size table gives each entry's width, height and row pitch. An entry
 // is a 256-colour RGBA palette (alpha 0-255) and then 8-bit indices, row by row.
 int Graphics::ui_entry(int64_t texture, int64_t variant) const {
-    constexpr uint32_t TEXTURES = 0x810ddf94, TEXTURE_COUNT = 337;
-    constexpr uint32_t RECORDS = 0x810ac158, RECORD_COUNT = 762;
+    const uint32_t textures = amg::vita_table_address(exe, 0x810ddf94);
+    const uint32_t records = amg::vita_table_address(exe, 0x810ac158);
+    constexpr uint32_t TEXTURE_COUNT = 337, RECORD_COUNT = 762;
     if (texture < 0 || texture >= TEXTURE_COUNT) return 0;
     auto word = [this](uint32_t va) { return le32(exe, amg::vita_va_to_off(exe, va, "texture table")); };
-    uint32_t variants = word(TEXTURES + 4 * uint32_t(texture));
+    uint32_t variants = word(textures + 4 * uint32_t(texture));
     auto record_at = [&](int64_t v) -> uint32_t {
         if (v < 0 || v > 255) return 0;
         uint32_t r = word(variants + 4 * uint32_t(v));
-        bool ok = r >= RECORDS && r < RECORDS + 8 * RECORD_COUNT && (r - RECORDS) % 8 == 0;
+        bool ok = r >= records && r < records + 8 * RECORD_COUNT && (r - records) % 8 == 0;
         return ok ? r : 0;
     };
     uint32_t rec = record_at(variant);
@@ -1196,14 +1197,14 @@ int Graphics::ui_entry(int64_t texture, int64_t variant) const {
 }
 
 const uint8_t* Graphics::ui_pixels(int entry, uint32_t& w, uint32_t& h, uint32_t& pitch) {
-    constexpr uint32_t SIZES = 0x810adf44;  // per entry: flag, width, height, pitch
+    const uint32_t sizes = amg::vita_table_address(exe, 0x810adf44);  // per entry: flag, width, height, pitch
     if (entry <= 0) return nullptr;
     if (sysgraph.empty() && !read_file("system/sysgraph.tm2", sysgraph)) return nullptr;
     auto word = [this](uint32_t va) { return le32(exe, amg::vita_va_to_off(exe, va, "texture sizes")); };
     uint32_t start = le32(sysgraph, 4 * size_t(entry));
-    w = word(SIZES + 16 * uint32_t(entry) + 4);
-    h = word(SIZES + 16 * uint32_t(entry) + 8);
-    pitch = word(SIZES + 16 * uint32_t(entry) + 12);
+    w = word(sizes + 16 * uint32_t(entry) + 4);
+    h = word(sizes + 16 * uint32_t(entry) + 8);
+    pitch = word(sizes + 16 * uint32_t(entry) + 12);
     if (w == 0 || h == 0 || w > 4096 || h > 4096 || pitch < w || uint64_t(start) + 1024 + uint64_t(pitch) * h > sysgraph.size()) return nullptr;  // 64-bit sums: garbage sizes must not wrap on x86
     return reinterpret_cast<const uint8_t*>(sysgraph.data()) + start;  // palette, then the indices
 }
@@ -1237,7 +1238,8 @@ uint32_t Graphics::exe_word(uint32_t addr) const {
     };
     for (const auto& t : tables)
         if (addr >= t.ps2 && addr + 4 <= t.ps2 + t.size)
-            return le32(exe, amg::vita_va_to_off(exe, t.vita + (addr - t.ps2), "engine table"));
+            return le32(exe, amg::vita_va_to_off(
+                                 exe, amg::vita_table_address(exe, t.vita + (addr - t.ps2)), "engine table"));
     return 0;
 }
 
@@ -1656,7 +1658,8 @@ int64_t Graphics::new_background(int64_t place, int64_t scene, int64_t mob, int6
         // interface view (origin 0) instead of the world's: the map's frame (200), the menus' pictures (139 to 149,
         // 207 to 216...). Event pictures are always in the world view (0x81009964). Not done yet: the interface view's
         // scale is 1 on the Vita, while the port scales every picture by the screen scale (only differs at 0.775).
-        size_t at = amg::vita_va_to_off(exe, 0x810A8660 + uint32_t(place), "place table");
+        size_t at = amg::vita_va_to_off(
+            exe, amg::vita_table_address(exe, 0x810A8660 + uint32_t(place)), "place table");
         if (at < exe.size() && exe[at] != 0) obj->follow = 0.0;
     }
     return add(std::move(obj));
@@ -1846,10 +1849,12 @@ void Graphics::actor_files(int64_t character, int64_t cloth, int64_t pose, std::
         // appended; the files are stem + "x"
         // (picture) and stem + "z.zb" (face layout), as on the PS2.
         constexpr uint32_t TABLE_A = 0x810ac0b2, TABLE_B = 0x810ca9cc, GROUP = 264, OUTFIT_STRIDE = 12;
-        size_t at = amg::vita_va_to_off(exe, uint32_t(TABLE_A + 2 * uint32_t(character)), "character table");
+        size_t at = amg::vita_va_to_off(
+            exe, amg::vita_table_address(exe, TABLE_A + 2 * uint32_t(character)), "character table");
         uint32_t row = le16(exe, at);
         uint32_t index = row * GROUP + uint32_t(pose) * OUTFIT_STRIDE + uint32_t(cloth);
-        size_t entry = amg::vita_va_to_off(exe, uint32_t(TABLE_B + 8 * index), "character entry");
+        size_t entry = amg::vita_va_to_off(
+            exe, amg::vita_table_address(exe, TABLE_B) + 8 * index, "character entry");
         uint32_t b = le32(exe, entry), f = le32(exe, entry + 4);
         if (b) body = "body/" + exe_string(b);
         if (f) face = "face/" + exe_string(f);

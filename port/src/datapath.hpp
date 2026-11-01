@@ -79,7 +79,7 @@ inline std::string find_game_root(const std::string& chosen, int depth = 4) {
 
 inline std::string vita_exe_file(const std::string& root) {
     std::error_code ec;
-    // The port's static Vita tables match the installed app executable; a patch eboot can relocate or replace them.
+    // The original executable uses the base table map; the English patch v1.1 has its own verified relocation profile.
     for (const std::string& path : {root + "/extracted/eboot_decrypted.elf", root + "/eboot_decrypted.elf",
                                     root + "/eboot.elf", root + "/eboot.bin", root + "/app/PCSG00291/eboot.bin",
                                     root + "/patch/PCSG00291/eboot.bin"}) {
@@ -176,6 +176,51 @@ inline std::string vita_exe(const std::string& root) {
         std::memcpy(elf.data() + p_offset, self.data() + so, size_t(len));
     }
     return elf;
+}
+
+inline bool vita_english_patch_v1_1(const std::string& elf) {
+    if (elf.size() < 52 || std::memcmp(elf.data(), "\x7f" "ELF", 4) != 0 || uint8_t(elf[4]) != 1 ||
+        uint8_t(elf[5]) != 1)
+        return false;
+    auto u16 = [&](size_t at) {
+        return uint16_t(uint8_t(elf[at]) | (uint16_t(uint8_t(elf[at + 1])) << 8));
+    };
+    auto u32 = [&](size_t at) {
+        return uint32_t(uint8_t(elf[at])) | (uint32_t(uint8_t(elf[at + 1])) << 8) |
+               (uint32_t(uint8_t(elf[at + 2])) << 16) | (uint32_t(uint8_t(elf[at + 3])) << 24);
+    };
+    const uint32_t phoff = u32(28);
+    const uint16_t phentsize = u16(42), phnum = u16(44);
+    if (phentsize < 32 || uint64_t(phoff) + uint64_t(phentsize) * phnum > elf.size()) return false;
+    bool text = false, data = false;
+    for (uint16_t i = 0; i < phnum; ++i) {
+        const size_t at = size_t(phoff) + size_t(phentsize) * i;
+        if (u32(at) != 1) continue;
+        const uint32_t va = u32(at + 8), filesz = u32(at + 16), memsz = u32(at + 20);
+        text = text || (va == 0x81000000 && filesz == 0xc9254 && memsz == 0xc9254);
+        data = data || (va == 0x810ca000 && filesz == 0x15b1c && memsz == 0x1fe368);
+    }
+    return text && data;
+}
+
+// The English fan patch v1.1 reorders these tables independently; the shifts are not one global image offset.
+inline uint32_t vita_table_address(const std::string& elf, uint32_t original_va) {
+    if (!vita_english_patch_v1_1(elf)) return original_va;
+    struct Relocation {
+        uint32_t start, size, shift;
+    };
+    static constexpr Relocation tables[] = {
+        {0x810a818c, 145 * 4, 0x200}, {0x810a85f4, 24 * 4, 0x238}, {0x810a8660, 400, 0x230},
+        {0x810ac0b2, 0xa6, 0x230},    {0x810ac158, 762 * 8, 0x230}, {0x810adea4, 56, 0x230},
+        {0x810ad964, 96, 0x230},      {0x810ad9c4, 96, 0x230},     {0x810ada24, 96, 0x230},
+        {0x810ada84, 0x1a0, 0x230},   {0x810adc24, 0x1a0, 0x230},  {0x810adf44, 762 * 16, 0x230},
+    };
+    if (original_va == 0x810ddf94) return original_va + 4;
+    if (original_va == 0x810ca9cc) return original_va + 4;
+    for (const Relocation& table : tables)
+        if (original_va >= table.start && uint64_t(original_va) < uint64_t(table.start) + table.size)
+            return original_va + table.shift;
+    return original_va;
 }
 
 inline size_t vita_va_to_off(const std::string& elf, uint32_t va, const char* source) {

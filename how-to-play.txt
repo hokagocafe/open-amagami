@@ -3,8 +3,9 @@ open-amagami - play Amagami (PS Vita) on Windows from your own copy
 
 You need your own copy of Amagami ebKore+ for PS Vita (PCSG00291), decrypted:
 the game's folder (AMAGAMI.IMG, SCENARIO.CPK, graph, sound and the executable)
-or a Vita3K install. The Japanese original and the English fan translation both
-work. Nothing of the game is in this download.
+or a Vita3K install. The Japanese original and English fan translation v1.1
+both work, including the executable supplied with the translation. Nothing of
+the game is in this download.
 
 HOW TO PLAY
 
@@ -22,7 +23,8 @@ The first time it offers an "Amagami" shortcut on the desktop and in the Start m
 (General tab, "Desktop shortcut" makes them again). Next time, open it and press "Start game".
 
 ENGLISH
-  If your copy has the English fan translation (v1.1), the game is in English.
+  If your copy has the English fan translation (v1.1), including its own
+  executable, the game is in English.
   For a Japanese copy: Game files tab, "Add English patch...", pick the translation's folder.
 
 CONTROLS

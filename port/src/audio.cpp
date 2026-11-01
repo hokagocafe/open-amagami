@@ -324,7 +324,7 @@ AudioEngine::AudioEngine(const std::string& root) : root_(root) {
     // chain. 145 entries, -1 (and garbage past the 145th) for none.
     std::string exe = amg::vita_exe(root);
     {
-        constexpr uint32_t TABLE_VA = 0x810a818c;
+        const uint32_t TABLE_VA = amg::vita_table_address(exe, 0x810a818c);
         size_t at = amg::vita_va_to_off(exe, TABLE_VA, "music table");
         for (int i = 0; i < 145 && at + 4 <= exe.size(); ++i, at += 4) {
             const unsigned char* b = reinterpret_cast<const unsigned char*>(exe.data()) + at;
@@ -335,7 +335,7 @@ AudioEngine::AudioEngine(const std::string& root) : root_(root) {
     {
         // Line offsets of the voice devices 15 to 37 (d1-audio-stage.md A5): 23 words and the one after them,
         // which device 37 reads as its upper bound.
-        constexpr uint32_t OFFSETS_VA = 0x810a85f4;
+        const uint32_t OFFSETS_VA = amg::vita_table_address(exe, 0x810a85f4);
         size_t at = amg::vita_va_to_off(exe, OFFSETS_VA, "voice line offsets");
         if (at + 4 * 24 <= exe.size()) {
             for (int i = 0; i < 24; ++i, at += 4) {

@@ -40,7 +40,8 @@ gamepad, the keyboard or the mouse. It is a new program that reads the game's ow
 - A PC with **Windows 10 or 11**.
 - **Your own copy of *Amagami ebKore+* for PS Vita** (`PCSG00291`), decrypted: the game's folder as a decrypted dump has it
   (`AMAGAMI.IMG`, `SCENARIO.CPK`, `graph`, `sound` and the executable), or a Vita3K install. The Japanese original and the English
-  fan translation both work. The program checks the copy and tells you what is wrong; it cannot decrypt one for you.
+  fan translation v1.1 both work, including the executable supplied with that translation. The program checks the copy and tells
+  you what is wrong; it cannot decrypt one for you.
 
 Nothing has to be installed: no runtimes, no emulator.
 
@@ -66,8 +67,8 @@ next time, open it from there (or run `amagami.exe`) and press Start game. **Gen
 
 ## Playing in English
 
-If your copy already has the English fan translation (*Amagami EbKore+ English v1.1*), the launcher says so and the game is in
-English. If your copy is the original Japanese one and you have the translation's files, open the **Game files** tab, press
+If your copy already has the English fan translation (*Amagami EbKore+ English v1.1*), including its own executable, the launcher
+says so and the game is in English. If your copy is the original Japanese one and you have the translation's files, open the **Game files** tab, press
 **Add English patch...** and pick the translation's folder; the program copies what it needs and switches to English. You can switch
 back in **Game files → Language** at any time.
 

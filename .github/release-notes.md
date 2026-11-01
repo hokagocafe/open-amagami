@@ -2,11 +2,12 @@
 
 **[open-amagami-windows-x64.zip](https://github.com/hokagocafe/open-amagami/releases/download/TAG/open-amagami-windows-x64.zip)** (in *Assets* below), for Windows 10 and 11. Nothing else to install.
 
-You need **your own copy** of *Amagami ebKore+* for PS Vita (`PCSG00291`), decrypted: the game's folder or a Vita3K install, Japanese or with the English fan translation. Nothing of the game is in this download.
+You need **your own copy** of *Amagami ebKore+* for PS Vita (`PCSG00291`), decrypted: the game's folder or a Vita3K install, Japanese or with the English fan translation v1.1. Nothing of the game is in this download.
 
 ## What's new
 
-- The mouse can now hover and open the *Port options* entry on the main menu. The game's own arrow is the pointer; before it is available, the cursor stays hidden instead of showing a Windows arrow.
+- The English fan patch v1.1's own executable is now supported. You can use a decrypted copy with the translation already applied; the launcher recognizes it and reports English.
+- The mouse hovers and opens the *Port options* entry on the main menu. The game's own arrow is the pointer; before it is available, the cursor stays hidden instead of showing a Windows arrow.
 
 ## How to play
 

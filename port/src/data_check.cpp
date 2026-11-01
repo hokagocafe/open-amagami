@@ -215,15 +215,14 @@ std::vector<Check> check_data(const std::string& root) {
         return out;
     }
     out.push_back({Check::Ok, "Decrypted copy", ui::tr("The archives and the executable are readable.")});
-    // The English fan patch ships its own executable, rebuilt with its tables moved: the port reads the engine's tables at
-    // the original's addresses, so it cannot use that one (a copy with the patch merged over the game has it).
+    // Some known executable builds are explicitly marked unusable; the English fan patch v1.1 is supported.
     {
         const auto listed = read_known();
         auto range = listed.equal_range(sha256_file(executable_path));
         for (auto it = range.first; it != range.second; ++it)
             if (it->second.label.find("not usable") != std::string::npos) {
                 out.push_back({Check::Fail, "Executable",
-                               ui::tr("This is the executable of the English fan patch, which the port cannot use. Use the original game's eboot.bin (from the unpatched game) in its place; the translated data files can stay.")});
+                               ui::tr("This eboot.bin version is not supported. Choose the original game folder, then add the supported English patch v1.1 in Game files.")});
                 return out;
             }
     }

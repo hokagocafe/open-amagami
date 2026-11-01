@@ -218,6 +218,15 @@ void layout_header(Window& w) {
     if (w.in_game || !w.start) return;
     const Scale& s = w.s;
     const bool bad = not_usable(w);
+    const Check* failed = nullptr;
+    for (const Check& c : w.checks)
+        if (c.status == Check::Fail) {
+            failed = &c;
+            break;
+        }
+    std::wstring fix_label = ui::wtr("Choose game folder...");
+    if (failed && failed->what == "Executable") fix_label = ui::wtr("Choose original folder...");
+    SetWindowTextW(w.fix, fix_label.c_str());
     ShowWindow(w.fix, bad ? SW_SHOW : SW_HIDE);
     ShowWindow(w.found, bad && !w.copies.empty() ? SW_SHOW : SW_HIDE);
     ShowWindow(w.update, w.update_tag.empty() ? SW_HIDE : SW_SHOW);
@@ -616,7 +625,9 @@ void paint_header(Window& w, HDC dc, const RECT& client) {
         text = ui::wtr("Choose the folder of your own copy of the game to begin.");
     } else if (failed) {
         status = Check::Fail;
-        text = ui::wtr(failed->what) + L": " + widen(failed->detail);
+        text = failed->what == "Executable"
+                   ? ui::wtr("Choose the original game folder, then add the English patch.")
+                   : ui::wtr(failed->what) + L": " + widen(failed->detail);
     } else {
         status = warned ? Check::Warn : Check::Ok;
         text = ui::wtr("Your game is ready. In the game, F8 opens the options.");
