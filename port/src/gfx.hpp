@@ -166,6 +166,7 @@ struct ScreenObject {
     bool paused = false;
     double sway_phase = -1.0;  // >= 0: the map icon's symbol bobs: 3 units up while the phase (frames, 0 to 60) is 30 or more
     int64_t order = 0;
+    double depth = -1.0;  // StandExt: its key among the characters of its layer (d1-draw-order.md 4); -1 for anything else
     std::string name;
     bool scale_on_screen = false;
     double follow = 0.0;        // see DrawItem::follow
@@ -292,6 +293,9 @@ struct Graphics {
         double x0 = 0, x1 = 0, h = 0;  // h 0: none
         double light[3] = {1, 1, 1};
         double alpha = 0;
+        double y = 0;          // with at_y: the centre's height (script units), else the arrow's
+        bool at_y = false;
+        double frame = 0;      // > 0: an outline of this thickness (a box round a picture), else a filled bar
     } mark;
     int64_t steps = 0;  // Graphics::step calls so far, copied into each scene as Scene::stamp
 

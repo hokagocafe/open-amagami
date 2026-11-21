@@ -21,11 +21,20 @@ const symbol "selectValueR"
 const symbol "setButtonGuide"
 const symbol "offButtonGuide"
 const symbol "destruct"
+const symbol "fade"
+const float 0x00000000 ; 0.0
+const float 0x3f800000 ; 1.0
+const float 0x41400000 ; 12.0
 ; The port's own options screen, opened from the main menu's sixth entry (PortHooks.mainSelect) with the menu it came
 ; from: the game's Settings screen (ConfigDialog, through PortDialog) with the port's tabs. Confirm on "Defaults" puts the
-; tab's rows back; L and R change the tab, up and down the row, left and right the value; cancel goes back.
-method "scriptMain" args=1 locals=4 {
+; tab's rows back; L and R change the tab, up and down the row, left and right the value; cancel goes back. The headers
+; cross as in the game's Settings: "Main menu" (arg2) fades out and "Option" (arg1) in, and back at the end.
+method "scriptMain" args=3 locals=4 {
     Sound.playSE(50);
+    if (arg2 != nil) {
+        arg2.fade(0.0f, 1, 12.0f);
+        arg1.fade(1.0f, 1, 12.0f);
+    }
     arg0.disable();
     self.sleep(12);
     loc0 = PortDialog.new().open();
@@ -78,6 +87,10 @@ method "scriptMain" args=1 locals=4 {
     loc0.close();
     self.sleep(9);
     loc0.destruct();
+    if (arg2 != nil) {
+        arg1.fade(0.0f, 1, 12.0f);
+        arg2.fade(1.0f, 1, 12.0f);
+    }
     arg0.enable();
     self.sleep(6);
 }

@@ -39,44 +39,45 @@ std::string exe_dir() {
 #endif
 }
 
-bool portable() {
-    std::error_code ec;
-    const std::string dir = exe_dir();
-    return !dir.empty() && std::filesystem::exists(join(dir, "portable.txt"), ec);
-}
-
 namespace {
 
-// `roaming`: %APPDATA% (small things that follow the user), else %LOCALAPPDATA% (large or disposable).
-std::string base(bool roaming) {
-    if (portable()) return join(exe_dir(), "portable-data");
+// Everything beside the program (D-048); off Windows nothing, so the callers keep their relative names.
+std::string base() {
 #ifdef _WIN32
-    std::string root = env(roaming ? "APPDATA" : "LOCALAPPDATA");
+    const std::string dir = exe_dir();
+    if (!dir.empty()) return join(dir, "portable-data");
+#endif
+    return "";
+}
+
+}  // namespace
+
+std::string legacy_dir(bool roaming) {
+#ifdef _WIN32
+    const std::string root = env(roaming ? "APPDATA" : "LOCALAPPDATA");
     if (!root.empty()) return root + "/open-amagami";
 #endif
     (void)roaming;
     return "";
 }
 
-}  // namespace
-
 std::string config_file() {
-    const std::string b = base(true);
+    const std::string b = base();
     return b.empty() ? "" : b + "/config.ini";
 }
 
 std::string save_dir() {
-    const std::string b = base(true);
+    const std::string b = base();
     return b.empty() ? "save" : b + "/save";
 }
 
 std::string game_dir() {
-    const std::string b = base(false);
+    const std::string b = base();
     return b.empty() ? "" : b + "/game";
 }
 
 std::string log_dir() {
-    const std::string b = base(false);
+    const std::string b = base();
     return b.empty() ? "" : b + "/logs";
 }
 

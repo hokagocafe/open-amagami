@@ -1994,11 +1994,19 @@ ImagePtr Graphics::actor_canvas(const std::string& body, const std::string& face
                 if (blush)
                     if (auto* r = nth(5, 0)) paste(*canvas, *face_sheet, {*r}, vx, vy, blush * 16);
                 std::vector<std::array<double, 7>> parts;
+                // FIDELITY: read 0x810104AA-0x810107E6 (fidelity.md item 10): the eyes and the mouth (groups 1 to 3) are
+                // pasted without a 2-texel border, the position and the sheet coordinates carrying the same inset; the
+                // blush and the sweat drop are whole sprites.
                 for (auto* r : {nth(1, eye), nth(2, eye), nth(3, mouth)})
-                    if (r) parts.push_back(*r);
+                    if (r && (*r)[4] > 4 && (*r)[5] > 4)
+                        parts.push_back({(*r)[0] + 2, (*r)[1] + 2, (*r)[2] + 2, (*r)[3] + 2, (*r)[4] - 4, (*r)[5] - 4, (*r)[6]});
+                    else if (r)
+                        parts.push_back(*r);
                 paste(*canvas, *face_sheet, parts, vx, vy);
+                // FIDELITY: read 0x8108CEDC and the step 0x8108D40A (item 9): the drop starts 32 units up in the Vita's own
+                // units, which are 3.2 texels each, not the PS2's 2.
                 if (sweat)
-                    if (auto* r = nth(4, 0)) paste(*canvas, *face_sheet, {*r}, vx, vy - 2 * drop, sweat * 16);
+                    if (auto* r = nth(4, 0)) paste(*canvas, *face_sheet, {*r}, vx, vy - 3.2 * drop, sweat * 16);
             }
         }
         keep_actor(key, canvas);
@@ -2232,30 +2240,48 @@ void draw(std::vector<uint8_t>& frame, const DrawItem& obj, bool smooth, int ymi
 
 }  // namespace
 
+// The Vita's order of drawing inside a layer (d1-draw-order.md 4): on unless AMG_VITA_DRAW_ORDER=0.
+static bool vita_draw_order() {
+    static const bool on = [] {
+        const char* e = std::getenv("AMG_VITA_DRAW_ORDER");
+        return !(e && std::string(e) == "0");
+    }();
+    return on;
+}
+
 std::shared_ptr<const Scene> Graphics::scene() const {
     auto out = std::make_shared<Scene>();
     out->items.reserve(objects.size());
     out->hide_uid = hide_uid;
     out->hide_image = hide_image;
     out->stamp = steps;
-    // FIDELITY (docs/technical/d1-draw-order.md, read twice; a Vita3K capture of two overlapping characters is still to
-    // do, so AMG_VITA_DRAW_ORDER=1 turns it on): the engine sorts the characters of a layer by the zoom's x, the larger in
-    // front (0x8100DB4E), whatever the order they were made in. The orders the characters had are handed out again by
-    // that key; everything else keeps its own.
-    static const bool vita_order = std::getenv("AMG_VITA_DRAW_ORDER") != nullptr;
+    // FIDELITY (docs/technical/d1-draw-order.md 4, confirmed by two readings of the eboot; D-041: the reading decides,
+    // AMG_VITA_DRAW_ORDER=0 goes back to plain creation order). Inside a layer, back to front: list 255 (backgrounds and
+    // plain event pictures, newest first), then the sorted objects (characters by the zoom's x, a breath puff by its
+    // depth; the larger key in front, ties in creation order), then list 1 (sprites, text, windows, balloons, icons,
+    // EventPicEx, newest first): in front of every character of the layer whatever the order they were made in.
+    // `order` is drawn larger first, so each list gets its own band of orders.
     std::map<int64_t, int64_t> order_of;  // uid -> the order to draw it with
-    if (vita_order) {
-        std::map<int64_t, std::vector<const ActorObject*>> by_layer;
-        for (const auto& [uid, obj] : objects)
-            if (auto* actor = dynamic_cast<const ActorObject*>(obj.get()); actor && !actor->draw_target) by_layer[actor->layer].push_back(actor);
-        for (auto& [layer, actors] : by_layer) {
-            std::vector<int64_t> orders;
-            for (auto* a : actors) orders.push_back(a->order);
-            std::sort(orders.begin(), orders.end());  // the smallest order is drawn last: the front
-            std::stable_sort(actors.begin(), actors.end(), [](const ActorObject* a, const ActorObject* b) {
-                return a->zoom.parts[0].current.at(0) > b->zoom.parts[0].current.at(0);  // the larger zoom first: the front
+    if (vita_draw_order()) {
+        constexpr int64_t SORTED = int64_t(1) << 40, BACK = int64_t(1) << 41;
+        std::map<int64_t, std::vector<std::pair<double, const ScreenObject*>>> sorted;  // layer -> (key, object)
+        for (const auto& [uid, obj] : objects) {
+            const ScreenObject* o = obj.get();
+            if (auto* actor = dynamic_cast<const ActorObject*>(o)) {
+                if (!actor->draw_target) sorted[o->layer].push_back({actor->zoom.parts[0].current.at(0), o});
+            } else if (o->depth >= 0) {
+                sorted[o->layer].push_back({o->depth, o});
+            } else if (!dynamic_cast<const EventPicExObject*>(o) &&
+                       (o->name.rfind("bg/", 0) == 0 || o->name.rfind("epi/", 0) == 0)) {
+                order_of[uid] = BACK + o->order;
+            }
+        }
+        for (auto& [layer, list] : sorted) {
+            std::stable_sort(list.begin(), list.end(), [](const auto& a, const auto& b) {
+                if (a.first != b.first) return a.first > b.first;  // the larger key first: the front
+                return a.second->order < b.second->order;           // a tie: the older in front
             });
-            for (size_t i = 0; i < actors.size(); ++i) order_of[actors[i]->uid] = orders[i];
+            for (size_t i = 0; i < list.size(); ++i) order_of[list[i].second->uid] = SORTED + int64_t(i);
         }
     }
     for (const auto& [uid, obj] : objects) {
@@ -2288,10 +2314,30 @@ std::shared_ptr<const Scene> Graphics::scene() const {
             bar.rect[2] = mark.x1 - mark.x0;
             bar.rect[3] = mark.h;
             bar.centre[0] = (mark.x0 + mark.x1) / 2;
-            bar.centre[1] = arrow.centre[1];
+            bar.centre[1] = mark.at_y ? mark.y : arrow.centre[1];
             for (int c = 0; c < 3; ++c) bar.light[c] = mark.light[c];
             bar.alpha = mark.alpha * std::min(1.0, arrow.alpha);
-            out->items.insert(out->items.begin() + std::ptrdiff_t(i) + 1, bar);
+            if (mark.frame > 0) {  // a box: its four sides
+                const double w = bar.rect[2], h = bar.rect[3], t = mark.frame, cx = bar.centre[0], cy = bar.centre[1];
+                DrawItem side[4] = {bar, bar, bar, bar};
+                for (int k = 0; k < 2; ++k) {  // top and bottom, then left and right
+                    side[k].rect[2] = w;
+                    side[k].rect[3] = t;
+                    side[k].centre[1] = cy + (k ? 1 : -1) * (h - t) / 2;
+                    side[2 + k].rect[2] = t;
+                    side[2 + k].rect[3] = h - 2 * t;
+                    side[2 + k].centre[0] = cx + (k ? 1 : -1) * (w - t) / 2;
+                }
+                out->items.insert(out->items.begin() + std::ptrdiff_t(i) + 1, side, side + 4);
+            } else {
+                // Behind its row's letters too when they were made after the arrow (the port's own options screen
+                // builds its rows after the cursor): drawn before the newest of them.
+                for (const DrawItem& t : out->items)
+                    if (t.text && t.layer == bar.layer && std::fabs(t.centre[1] - bar.centre[1]) < mark.h / 2 &&
+                        t.centre[0] >= mark.x0 && t.centre[0] <= mark.x1)
+                        bar.order = std::max(bar.order, t.order + 1);
+                out->items.insert(out->items.begin() + std::ptrdiff_t(i) + 1, bar);
+            }
             break;
         }
     }
@@ -2495,7 +2541,12 @@ static Scene view_of(const Scene& scene) {
         // over); when the principal moves its anchor follows it at once (a sliding menu slides smoothly); when it is
         // replaced (removed, or moved while another takes over), the anchor eases from the old to the new one over EASE
         // frames instead of jumping. Entries of groups that are gone are dropped at the next frame.
-        struct Hold { double bx0, by0, bx1, by1, ax, ay, ox, oy; int left; int64_t principal; };  // b*: the member's own box
+        // b*: the member's own box; ax..left: its group's anchor and easing; iax, iay: the anchor the member was drawn with
+        // seen: drawn last frame (not transparent, partly on the screen)
+        struct Hold {
+            double bx0, by0, bx1, by1, ax, ay, ox, oy; int left; int64_t principal; double iax = 0, iay = 0; bool seen = false;
+        };
+        std::vector<double> item_ax(n, std::nan("")), item_ay(n, std::nan(""));
         static std::unordered_map<int64_t, Hold> prev, cur;
         static int64_t cur_stamp = -1;
         constexpr int EASE = 8;
@@ -2513,6 +2564,26 @@ static Scene view_of(const Scene& scene) {
             return std::fabs(h.bx0 - b.x0) < 0.25 && std::fabs(h.by0 - b.y0) < 0.25 && std::fabs(h.bx1 - b.x1) < 0.25 &&
                    std::fabs(h.by1 - b.y1) < 0.25;
         };
+        // The member's own anchor (interface-scale.md, "Per-item rate"): it goes toward its group's anchor but, per axis,
+        // by no more per frame than the member's centre moved at 100 % on that axis. Drawn at k, a member moves
+        // (1 - k) * (anchor step) + k * (its centre's step), so its centre never moves more than at 100 % and never moves while it stands
+        // still, even when its group changes (a piece joining or leaving a bigger one) or the group's anchor jumps. Only
+        // a member that was not seen the frame before (transparent, or drawn wholly outside the screen) takes the
+        // group's anchor at once: nobody sees that jump, and an entry sliding in from beyond the edge lands in its column.
+        auto own_anchor = [&](size_t i, size_t g, const Hold& h, int64_t p) {
+            const Box b = box_of(out.items[i]);
+            double ix = gax[g], iy = gay[g];
+            if (auto f = prev.find(out.items[i].uid); f != prev.end() && f->second.seen) {
+                const Hold& o = f->second;
+                // its centre's step (a piece that grows or squashes about its centre keeps its anchor and its centre)
+                const double lx = std::fabs(b.x0 + b.x1 - o.bx0 - o.bx1) / 2, ly = std::fabs(b.y0 + b.y1 - o.by0 - o.by1) / 2;
+                ix = o.iax + std::clamp(gax[g] - o.iax, -lx, lx);
+                iy = o.iay + std::clamp(gay[g] - o.iay, -ly, ly);
+            }
+            item_ax[i] = ix;
+            item_ay[i] = iy;
+            cur[out.items[i].uid] = Hold{b.x0, b.y0, b.x1, b.y1, h.ax, h.ay, h.ox, h.oy, h.left, p, ix, iy, false};
+        };
         for (size_t g = 0; g < boxes.size(); ++g) {
             if (kind[g] == 0) continue;
             const Box& c = core[g].x0 <= core[g].x1 ? core[g] : boxes[g];
@@ -2521,14 +2592,30 @@ static Scene view_of(const Scene& scene) {
             if (remember && kind[g] == 1 && !ties[g].empty()) {
                 int64_t p = ties[g][0].first;
                 Box pb = ties[g][0].second;
-                // A former principal among the members: one whose box is unchanged first, then the current principal
-                // itself, then any (the lowest uid, members being in drawing order: the first met).
+                // The group's lineage: the former group of its principal, or, for a new principal, the former group of
+                // its largest member seen before. Only members of that lineage hand the anchor on: a small piece that
+                // stood alone and is now overlapped (the text window bouncing over the mark beside it) must not give the
+                // window its own anchor (interface-scale.md, "Lineage").
+                int64_t lineage = 0;
+                bool has_lineage = false;
+                if (auto f = prev.find(p); f != prev.end()) { lineage = f->second.principal; has_lineage = true; }
+                else {
+                    double most = -1;
+                    for (size_t i : members[g])
+                        if (auto f2 = prev.find(out.items[i].uid); f2 != prev.end() && box_of(out.items[i]).area > most) {
+                            most = box_of(out.items[i]).area;
+                            lineage = f2->second.principal;
+                            has_lineage = true;
+                        }
+                }
+                // Among the lineage's members: one whose box is unchanged first (the former principal before others),
+                // then the current principal itself, then any.
                 const Hold* old = nullptr;
                 int64_t old_uid = 0;
                 int score = -1;
                 for (size_t i : members[g]) {
                     auto f = prev.find(out.items[i].uid);
-                    if (f == prev.end()) continue;
+                    if (!has_lineage || f == prev.end() || f->second.principal != lineage) continue;
                     const bool was_principal = f->second.principal == out.items[i].uid;
                     const int s = same_box(f->second, box_of(out.items[i])) ? 2 + was_principal
                                 : (was_principal && out.items[i].uid == p ? 1 : 0);
@@ -2553,12 +2640,12 @@ static Scene view_of(const Scene& scene) {
                     h.left = EASE - 1;
                 }
                 h.principal = p;
-                for (size_t i : members[g]) {  // every member carries the group's anchor, so any survivor can hand it on
-                    const Box b = box_of(out.items[i]);
-                    cur[out.items[i].uid] = Hold{b.x0, b.y0, b.x1, b.y1, h.ax, h.ay, h.ox, h.oy, h.left, p};
-                }
                 gax[g] = h.ax + h.ox * h.left / EASE;
                 gay[g] = h.ay + h.oy * h.left / EASE;
+                for (size_t i : members[g]) own_anchor(i, g, h, p);  // every member carries the group's anchor
+            } else if (remember && kind[g] == 2) {
+                const size_t i = members[g].front();  // a lone item (hidden or outside the screen): its own lineage
+                own_anchor(i, g, Hold{0, 0, 0, 0, gax[g], gay[g], 0.0, 0.0, 0, out.items[i].uid}, out.items[i].uid);
             }
             if (kind[g] == 1 && boxes[g].area > biggest) {
                 biggest = boxes[g].area;
@@ -2571,7 +2658,8 @@ static Scene view_of(const Scene& scene) {
         for (size_t i = 0; i < n; ++i) {
             if (group[i] < 0) continue;
             DrawItem& it = out.items[i];
-            const double ax = gax[size_t(group[i])], ay = gay[size_t(group[i])];
+            const double ax = std::isnan(item_ax[i]) ? gax[size_t(group[i])] : item_ax[i],
+                         ay = std::isnan(item_ay[i]) ? gay[size_t(group[i])] : item_ay[i];
             it.shrunk = true;
             it.ui_ax = ax;
             it.ui_ay = ay;
@@ -2579,6 +2667,9 @@ static Scene view_of(const Scene& scene) {
             it.centre[1] = ay + (it.centre[1] - ay) * u;
             it.scale[0] *= u;
             it.scale[1] *= u;
+            if (remember) {
+                if (auto f = cur.find(it.uid); f != cur.end()) f->second.seen = it.alpha > 0.01 && on_screen(box_of(it));
+            }
             if (it.clipped) {
                 const double cx = half_w + ax, cy = half_h + ay;  // the anchor in screen pixels from the corner
                 it.clip[0] = cx + (it.clip[0] - cx) * u;
@@ -3072,8 +3163,11 @@ void install_graphics(VM& vm) {
         ScreenObject* obj = target(st, b);
         if (obj) {
             obj->layer = int_of(arg(st, b, 0));
-            ++g->created;
-            obj->order = g->created;
+            // The Vita's setLayer (0x81084940) changes only the command list: the object keeps its place in the order.
+            if (!vita_draw_order()) {
+                ++g->created;
+                obj->order = g->created;
+            }
         }
         return st[b];
     };
@@ -3431,14 +3525,19 @@ void install_graphics(VM& vm) {
         return st[b];
     });
     // StandExt(texture, variant, layer, depth): a sprite of the texture table (Breath uses 242, sysgraph/breath%1d)
-    // that the engine sorts among the characters by `depth`. APPROXIMATION: the depth sort among characters is not
-    // modelled (as for the characters themselves, see objects.md); the puff is drawn on top of its layer.
+    // that the engine sorts among the characters by `depth` (Graphics::scene; with AMG_VITA_DRAW_ORDER=0 the puff is
+    // drawn on top of its layer instead).
     prim("StandExt", 0, [g, arg, self_iv](VM&, Thread&, std::vector<Value>& st, size_t b, Method&) -> Value {
         int64_t uid = g->new_sprite(int_of(arg(st, b, 0)), int_of(arg(st, b, 1)), int_of(arg(st, b, 2)));
         // Breath passes the character's depth plus 0.001: in front of that character. Without the depth sort, the
         // puff goes in front of everything in its layer (order 0 is drawn last there); created after the character,
         // it was drawn behind it (reported against PCSX2, 2026-10-17).
-        if (ScreenObject* o = g->get(uid)) o->order = 0;
+        if (ScreenObject* o = g->get(uid)) {
+            if (vita_draw_order())
+                o->depth = std::max(0.0, number(arg(st, b, 3)));  // sorted among the characters by it (d1-draw-order.md 4)
+            else
+                o->order = 0;
+        }
         self_iv(st, b).at(0) = Value::integer(uid);
         return st[b];
     });

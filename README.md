@@ -59,8 +59,10 @@ English, Spanish or Japanese, following Windows):
 
 <p align="center"><img src="media/launcher.png" alt="The launcher: every check of the game folder is green" width="520"></p>
 
-**3. Press Start game.** That is all. The first time, the program also offers a shortcut on the desktop and in the Start menu;
-next time, open it from there (or run `amagami.exe`) and press Start game. **General → Desktop shortcut** makes them again.
+**3. Press Start game.** That is all. Once the game is loaded, the program leaves a shortcut called *Amagami* next to `amagami.exe`
+with the game's own icon (the icon inside the `.exe` cannot change, so this is the file that carries the game's picture); it is made
+again at each start, so it follows the folder if you move it. For a shortcut on the desktop press **Game files → Create desktop
+shortcut** (or run `amagami.exe shortcut`). Nothing else is put on the desktop or in the Start menu.
 
 > Windows may say *"Windows protected your PC"* the first time, because the program is new and not signed. Press **More info**, then
 > **Run anyway**.
@@ -103,14 +105,18 @@ and is remembered.
 
 ## Questions
 
-**Where are my saves?** In `%APPDATA%\open-amagami` (paste that into the address bar of a folder window, or use **Game files → Open
-saves folder**). Updating the program keeps them.
+**Where are my saves?** In the `portable-data` folder next to `amagami.exe` (**Game files → Open saves folder** opens it). The
+program writes nothing else outside its own folder (the only exception is the desktop shortcut, and only when you ask for it), so it
+needs a folder you can write to: not `Program Files`. Updating the program keeps them.
+If you used an earlier version, the first start copies your saves, settings and game copy from the old folders
+(`%APPDATA%\open-amagami`, `%LOCALAPPDATA%\open-amagami`) into `portable-data` and then asks whether to delete the old ones
+(the default answer is No).
 
 **How do I update?** When a new version is out, the launcher shows a **Get the new version** button (the version you have is written
 beside the title; **General → Check for updates** turns the check off). Press it and answer Yes: the program downloads the new
 version, checks it against its published SHA-256, replaces itself and restarts, or, if anything goes wrong, leaves everything as it
 was and opens the download page. You can also unpack the new zip over the old folder, or into a new one. Either way your saves,
-settings and copied game stay where they are, and the desktop and Start menu shortcuts follow the new folder on their own.
+settings and copied game stay where they are, and the shortcut next to the program is made again by the new one. A shortcut you put on the desktop points at the old folder: make it again from the launcher.
 
 **The game says a save is unreadable.** If a save file is damaged, or comes from another version of the program, it is moved
 aside into a folder called `unreadable-...` inside the saves folder (nothing is deleted) and the next start is clean.
@@ -119,11 +125,22 @@ aside into a folder called `unreadable-...` inside the saves folder (nothing is 
 failure at start-up, the launcher opens the next time so you can check the game folder. Send the report with what you were doing.
 Folders with accents or Japanese letters in their names work.
 
-**Can I delete my original copy after it is copied?** Yes. The program keeps its own copy in `%LOCALAPPDATA%\open-amagami`;
+**Can I delete my original copy after it is copied?** Yes. The program keeps its own copy in `portable-data`;
 **Game files → Delete copy of the game...** removes it again.
 
-**Can I keep everything in one folder (a USB stick)?** Put an empty file called `portable.txt` next to `amagami.exe`; saves, settings
-and the game copy then go into a `portable-data` folder beside it.
+**Can I keep everything in one folder (a USB stick)?** That is how it works now: saves, settings and the game copy are all in
+`portable-data` beside `amagami.exe`, so moving or copying the folder moves everything.
+
+**Can I use it from a terminal, without the launcher window?** Yes; the launcher is only one way in. Run `amagami.exe help` for the
+list. The commands are `status`, `check [FOLDER]`, `settings list|get|set`, `find`, `use FOLDER [--import|--in-place]`,
+`add-variant [FOLDER]` (the English patch), `delete-copy [--yes]`, `shortcut`, `update check|install [--yes]` and `start`. They exit with 0 when done,
+1 when the answer is no or the step failed, 2 when the command was used wrongly. Whatever the window would ask, the terminal asks, or
+takes `--yes`, `--no`, `--import` or `--in-place` for it.
+
+**Can I have the launcher dark?** It follows the system's light or dark setting; **General → Window colours** forces light or dark.
+
+**The launcher window does not open or looks wrong.** It draws with SDL3. If it cannot start, the program opens the older Windows
+launcher by itself; you can also choose it by adding the line `launcher_ui=win32` to `config.ini` in `portable-data`.
 
 **A check is red.** Read the line under it: it says what is missing or unreadable. The most common case is a copy that is still
 encrypted; the program can only use a decrypted one. If the sound line warns, part of the copy's sound files are missing and the

@@ -289,11 +289,11 @@ int main(int argc, char** argv) {
             };
         }
         if (!mouse.empty() && vm.graphics) {
-            // The headless mouse: the same pointer as the window's (menu_pointer.hpp), fed from the list and the last picture.
+            // The headless mouse: the same as the window's (mouse_menus.hpp, menu_pointer.hpp), fed from the list and the last picture.
             std::sort(mouse.begin(), mouse.end(), [](const MouseAt& a, const MouseAt& b) { return a.tick < b.tick; });
             auto previous = vm.on_tick;
             struct MouseState {
-                MenuPointer first;   // the press bursts, for the screens with no registered menu
+                MenuPointer first;   // click confirm / right click cancel, for the screens no adapter holds
                 bool second = false; // the button was down
                 bool mode = false;   // mouse mode: set by a new mouse entry, ended by a --press
                 MouseMenus menus;    // the registered menus (mouse_menus.hpp)
@@ -333,18 +333,12 @@ int main(int argc, char** argv) {
                 const Scene* scene = &seen;
                 MenuPictures pics;
                 pics.cursor = v.graphics->ui_image(20, 0);
-                pics.tab = v.graphics->ui_image(47, 0);
-                pics.note = v.graphics->ui_image(33, 0);
                 pics.back = v.graphics->ui_image(62, 2);
-                pics.arrow = v.graphics->ui_image(7, 0);
-                pics.map_cursor = v.graphics->ui_image(25, 0);
-                for (int k = 0; k < 4; ++k) pics.map_arrow[k] = v.graphics->ui_image(28 + k, 0);
                 const int wheel = edge ? (at->flags.find('u') != std::string::npos) - (at->flags.find('n') != std::string::npos) : 0;
                 const bool right = edge && at->flags.find('r') != std::string::npos;
                 int menu_mask = 0;
                 const bool native = state->menus.update(v, *scene, at->x, at->y, true, down, click, right, wheel, menu_mask);
                 if (native) {
-                    state->first.yield();
                     v.pointer_mask = menu_mask;
                     if (state->mode) {
                         v.graphics->hide_uid = state->menus.arrow_uid;

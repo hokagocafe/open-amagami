@@ -730,6 +730,11 @@ void install_natives(VM& vm) {
             amg::mouse_menus_mirror(vm, a[0]);
             return Value();
         }, true);
+        reg("PortMouse", "setLocal", 2, NATIVE {
+            UNUSED;
+            amg::mouse_menus_set_local(vm, a[0], a[1]);
+            return Value();
+        }, true);
     }
     // --- PortSettings: the port's rows in the game's Settings screen (port/script, src/port_settings.hpp) ---------------
     if (vm.sources.count("PortSettings")) {
@@ -1338,6 +1343,13 @@ void install_natives(VM& vm) {
     // load list shows as MM/DD hh:mm: [month, day, hour, minute], the PS2 engine's order (it wrote them into the
     // serialized header itself). The PC's local time.
     prim("K2X_Script", 5, [](VM& v, Thread&, std::vector<Value>&, size_t, Method&) {
+        // Test hook: AMG_FIXED_CLOCK="month,day,hour,minute" makes the time stamp the same in every run, so a replay that
+        // saves and loads can be compared by picture.
+        if (const char* fixed = std::getenv("AMG_FIXED_CLOCK")) {
+            int mo = 0, d = 0, h = 0, mi = 0;
+            if (std::sscanf(fixed, "%d,%d,%d,%d", &mo, &d, &h, &mi) == 4)
+                return v.make_arr(v.find_class("Array"), {Value::integer(mo), Value::integer(d), Value::integer(h), Value::integer(mi)});
+        }
         std::time_t now = std::time(nullptr);
         std::tm local{};
 #ifdef _WIN32

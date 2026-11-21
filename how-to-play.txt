@@ -19,8 +19,9 @@ HOW TO PLAY
      version may only warn.
   3. Press "Start game".
 
-The first time it offers an "Amagami" shortcut on the desktop and in the Start menu
-(General tab, "Desktop shortcut" makes them again). Next time, open it and press "Start game".
+Once the game is loaded, a shortcut called "Amagami" with the game's icon appears next to
+amagami.exe (it is made again at each start). For one on the desktop, press "Create desktop
+shortcut" in the Game files tab. Nothing else is put on the desktop or in the Start menu.
 
 ENGLISH
   If your copy has the English fan translation (v1.1), including its own
@@ -45,13 +46,18 @@ CONTROLS
   The window opens at 80 % of your screen and remembers its size and place.
 
 SAVES AND UPDATES
-  Saves and settings: %APPDATA%\open-amagami (Game files tab, "Open saves folder").
+  Saves, settings and the game copy: the "portable-data" folder next to amagami.exe
+  (Game files tab, "Open saves folder"). Keep the program in a folder you can write to.
+  If you used an earlier version, the first start copies your data from the old folders
+  and asks whether to delete them.
   The launcher says when a new version is out ("Get the new version"): press it and
   answer Yes to install it (if that fails, nothing changes and the download page opens).
   Or unpack the new zip over this folder. Saves and settings are kept either way.
   A damaged save is moved aside into a folder "unreadable-..." in the saves folder, and
   the next start is clean.
-  Portable use: put an empty file named portable.txt next to amagami.exe.
+  Everything is portable: move or copy the whole folder and nothing is left behind.
+  From a terminal: "amagami.exe help" lists the commands (status, check, settings, find,
+  use, add-variant, delete-copy, shortcut, update, start); the launcher window is optional.
 
 IF IT STOPS
   A window says where the report is saved (crash.txt, in the saves and settings folder).

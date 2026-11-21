@@ -39,9 +39,10 @@ classmethod "mainMenu" args=1 locals=3 {
         PortSettings.setField(arg0, "pitchY", 22.0f);
     }
 }
-; scriptMain, when an entry is confirmed: the port's screen for command 8; the game's own commands go on as before.
-classmethod "mainSelect" args=2 locals=0 {
+; scriptMain, when an entry is confirmed: the port's screen for command 8, with scriptMain's "Option" and "Main menu"
+; headers (nil when the patch did not find them); the game's own commands go on as before.
+classmethod "mainSelect" args=4 locals=0 {
     if (arg0 == 8) {
-        PortMain.new().scriptMain(arg1);
+        PortMain.new().scriptMain(arg1, arg2, arg3);
     }
 }

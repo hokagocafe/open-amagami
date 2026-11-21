@@ -7,7 +7,8 @@
 // under the mouse changes, one short script thread (port/script/PortMouse.scfs) moves the selection there in one step
 // with the menu's own CommandMenu.moveCursor(i), plays the owner's move sound and writes the owner's copy of the index:
 // the same as one pad move, whatever the distance. A click on the selected entry is confirm for one frame, a right
-// click cancel. Screens with no registered menu are left to MenuPointer (the press bursts) until their adapters exist.
+// click cancel. Screens no adapter holds (dialogue, the title, the gallery viewer) are left to MenuPointer: click confirm,
+// right click cancel.
 #pragma once
 
 #include <functional>
@@ -59,6 +60,20 @@ private:
                        double my, bool inside, bool click, bool right_click, int wheel_steps, int& mask);
     bool gallery_update(VM& vm, const Scene& seen, const Value& gallery, const Value& cursor, double mx, double my,
                         bool inside, bool click, bool right_click, int wheel_steps, int& mask);
+    bool album_update(VM& vm, const Scene& seen, Thread* t, const Frame* fr, bool pictures, double mx, double my,
+                      bool inside, bool click, bool right_click, int wheel_steps, int& mask);
+    bool history_update(VM& vm, const Scene& seen, const Value& view, const Value& title, double mx, double my,
+                        bool inside, bool click, bool right_click, int wheel_steps, int& mask);
+    bool map_update(VM& vm, const Scene& seen, Thread* t, const Frame* fr, const Value& free_owner, double mx, double my,
+                    bool inside, bool click, bool right_click, int wheel_steps, int& mask);
+    bool strip_update(VM& vm, const Scene& seen, const Value& sel, const Value& mentsu, int after, double mx, double my,
+                      bool inside, bool click, bool right_click, int wheel_steps, int& mask);
+    bool kaiwa_update(VM& vm, const Scene& seen, Thread* t, const Frame* fr, double mx, double my, bool inside, bool click,
+                      bool right_click, int wheel_steps, int& mask);
+    bool info_update(VM& vm, const Scene& seen, Thread* t, const Frame* fr, bool favor, double mx, double my, bool inside,
+                     bool click, bool right_click, int wheel_steps, int& mask);
+    bool title_update(VM& vm, const Scene& seen, const Value& owner, const Value& menu, double mx, double my, bool inside,
+                      bool click, bool right_click, int wheel_steps, int& mask);
     bool name_update(VM& vm, const Scene& seen, const Value& owner, bool grid, double mx, double my, bool inside, bool click,
                      bool right_click, int wheel_steps, int& mask);
 };
@@ -66,5 +81,8 @@ private:
 // PortMouse.mirror(i) (natives.cpp): writes i into the owner's copy of the index (MainMenu.cursor, GameMenu's local)
 // for the menu the last select thread was started for, if that owner's loop frame is still there.
 void mouse_menus_mirror(VM& vm, const Value& index);
+// PortMouse.setLocal(slot, v) (natives.cpp): writes v into slot `slot` (the arguments, then the locals) of the same
+// owner's frame, for owners whose loop keeps more than the index in its locals (the day map's place and tag).
+void mouse_menus_set_local(VM& vm, const Value& slot, const Value& v);
 
 }  // namespace amg

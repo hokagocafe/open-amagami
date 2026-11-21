@@ -1,4 +1,4 @@
-// The game's icon and the shortcuts to the program. The icon is the one in the player's own copy (`sce_sys/icon0.png`, the
+// The game's icon. The icon is the one in the player's own copy (`sce_sys/icon0.png`, the
 // Vita's home screen icon), turned into a .ico in the program's folder: nothing of the game ships with the program (D-012).
 // Windows only.
 #pragma once
@@ -15,15 +15,13 @@ std::string game_icon_file(const std::string& root);
 // The game's icon at `size` pixels for a window (title bar, taskbar), or nullptr; the caller keeps it for the program's life.
 HICON load_game_icon(const std::string& root, int size);
 
-// Creates (or refreshes) "Amagami" shortcuts to this program on the desktop and in the Start menu's Programs folder, with the
-// game's icon from `root` (the program's own icon if the copy has none); "" when both were made, otherwise what failed.
-std::string create(const std::string& root);
+// A shortcut `<name>.lnk` next to the program's .exe with the game's icon, written again at each start so that it follows the folder when it
+// is moved. Quiet: "" when written or when there is nothing to do (no game picture), else the reason. The .exe's own icon is inside the file and
+// cannot follow the game; this is the file that does, as the engines of older visual novels do.
+std::string refresh_next_to_program(const std::string& name, const std::string& root);
 
-// Points existing "Amagami" shortcuts (desktop, Start menu) at this program when they lead elsewhere, as after unpacking a
-// new version into another folder. Never makes new ones, and does nothing in portable mode.
-void refresh(const std::string& root);
-
-// Offers the shortcuts once (after the first setup), unless in portable mode or already asked. `mark_asked` remembers it.
-void offer_once(const std::string& root, bool asked, void (*mark_asked)());
+// The same shortcut on the player's desktop, only when asked for. Returns the path written ("" on failure); `result` holds the path or the reason.
+// AMG_DESKTOP_DIR names another folder (tests).
+std::string make_desktop_link(const std::string& name, const std::string& root, std::string& result);
 
 }  // namespace amg::shortcut

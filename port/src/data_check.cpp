@@ -302,10 +302,4 @@ std::string known_label(const std::string& path, const std::string& name) {
     return "";
 }
 
-bool usable(const std::vector<Check>& checks) {
-    for (const Check& c : checks)
-        if (c.status == Check::Fail) return false;
-    return !checks.empty();
-}
-
 }  // namespace amg

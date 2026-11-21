@@ -5,13 +5,13 @@
 #include <shobjidl.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <vector>
 
 #include "paths.hpp"
-#include "ui_text.hpp"
 #include "third_party/stb/stb_image.h"
 
 namespace amg::shortcut {
@@ -48,30 +48,6 @@ std::vector<uint8_t> read_all(const fs::path& file) {
     return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {});
 }
 
-// Writes one .lnk at `link` pointing at `exe`, run from the program's folder, with the icon `icon`.
-bool write_link(const std::wstring& link, const std::wstring& exe, const std::wstring& dir, const std::wstring& icon) {
-    IShellLinkW* sl = nullptr;
-    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, reinterpret_cast<void**>(&sl))))
-        return false;
-    sl->SetPath(exe.c_str());
-    sl->SetWorkingDirectory(dir.c_str());
-    sl->SetIconLocation(icon.c_str(), 0);
-    sl->SetDescription(L"Play Amagami (open-amagami)");
-    IPersistFile* pf = nullptr;
-    bool ok = SUCCEEDED(sl->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&pf))) && SUCCEEDED(pf->Save(link.c_str(), TRUE));
-    if (pf) pf->Release();
-    sl->Release();
-    return ok;
-}
-
-std::wstring known_folder(REFKNOWNFOLDERID id) {
-    PWSTR path = nullptr;
-    std::wstring out;
-    if (SUCCEEDED(SHGetKnownFolderPath(id, 0, nullptr, &path))) out = path;
-    CoTaskMemFree(path);
-    return out;
-}
-
 }  // namespace
 
 std::string game_icon_file(const std::string& root) {
@@ -85,7 +61,7 @@ std::string game_icon_file(const std::string& root) {
     if (!rgba) return "";
     const std::vector<uint8_t> ico = ico_from_rgba(rgba, w, h);
     stbi_image_free(rgba);
-    // Beside the imported copy, not inside it: "Delete copy of the game" leaves the shortcuts their icon.
+    // Beside the imported copy, not inside it: "Delete copy of the game" leaves the window its icon.
     const fs::path out = (fs::u8path(games).parent_path() / "game-icon.ico").make_preferred();
     if (read_all(out) != ico) {
         fs::create_directories(out.parent_path(), ec);
@@ -100,65 +76,83 @@ HICON load_game_icon(const std::string& root, int size) {
     return HICON(LoadImageW(nullptr, fs::u8path(file).wstring().c_str(), IMAGE_ICON, size, size, LR_LOADFROMFILE));
 }
 
-std::string create(const std::string& root) {
-    wchar_t exe[MAX_PATH];
-    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    if (n == 0 || n == MAX_PATH) return ui::tr("The program's own path could not be read.");
-    std::wstring dir(exe);
-    dir = dir.substr(0, dir.find_last_of(L"\\/"));
-    const std::string icon_file = game_icon_file(root);
-    const std::wstring icon = icon_file.empty() ? std::wstring(exe) : fs::u8path(icon_file).wstring();
-    const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    std::string failed;
-    const std::wstring desktop = known_folder(FOLDERID_Desktop), programs = known_folder(FOLDERID_Programs);
-    if (desktop.empty() || !write_link(desktop + L"\\Amagami.lnk", exe, dir, icon)) failed += ui::tr("The desktop shortcut could not be made.") + " ";
-    if (programs.empty() || !write_link(programs + L"\\Amagami.lnk", exe, dir, icon)) failed += ui::tr("The Start menu shortcut could not be made.");
-    if (SUCCEEDED(co)) CoUninitialize();
-    return failed;
-}
+namespace {
 
-void refresh(const std::string& root) {
-    if (paths::portable()) return;
-    wchar_t exe[MAX_PATH];
-    const DWORD n = GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    if (n == 0 || n == MAX_PATH) return;
-    std::wstring dir(exe);
-    dir = dir.substr(0, dir.find_last_of(L"\\/"));
-    const HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    std::wstring icon;
-    for (REFKNOWNFOLDERID folder : {FOLDERID_Desktop, FOLDERID_Programs}) {
-        const std::wstring base = known_folder(folder);
-        if (base.empty()) continue;
-        const std::wstring link = base + L"\\Amagami.lnk";
-        std::error_code ec;
-        if (!fs::exists(link, ec)) continue;
-        IShellLinkW* sl = nullptr;
-        if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, reinterpret_cast<void**>(&sl)))) continue;
-        IPersistFile* pf = nullptr;
-        wchar_t target[MAX_PATH] = {};
-        if (SUCCEEDED(sl->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&pf))) && SUCCEEDED(pf->Load(link.c_str(), STGM_READ)))
-            sl->GetPath(target, MAX_PATH, nullptr, SLGP_RAWPATH);
-        if (pf) pf->Release();
-        sl->Release();
-        if (target[0] && lstrcmpiW(target, exe) != 0) {
-            if (icon.empty()) {
-                const std::string file = game_icon_file(root);
-                icon = file.empty() ? std::wstring(exe) : fs::u8path(file).wstring();
-            }
-            write_link(link, exe, dir, icon);
+// A .lnk that starts `target` from `work_dir` with the picture of `icon` (a .ico, "" for the program's own). "" when written, else the reason.
+std::string write_link(const fs::path& lnk, const fs::path& target, const fs::path& work_dir, const std::string& icon, const std::wstring& description) {
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    std::string error;
+    IShellLinkW* link = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link)))) {
+        error = "the system's shortcut service is not available";
+    } else {
+        link->SetPath(target.wstring().c_str());
+        link->SetWorkingDirectory(work_dir.wstring().c_str());
+        link->SetDescription(description.c_str());
+        if (!icon.empty()) link->SetIconLocation(fs::u8path(icon).wstring().c_str(), 0);
+        IPersistFile* file = nullptr;
+        if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file)))) {
+            if (FAILED(file->Save(lnk.wstring().c_str(), TRUE))) error = "the shortcut could not be written to " + lnk.u8string();
+            file->Release();
+        } else {
+            error = "the system's shortcut service refused the file";
         }
+        link->Release();
     }
-    if (SUCCEEDED(co)) CoUninitialize();
+    if (SUCCEEDED(init)) CoUninitialize();
+    return error;
 }
 
-void offer_once(const std::string& root, bool asked, void (*mark_asked)()) {
-    if (asked || paths::portable()) return;
-    mark_asked();
-    if (MessageBoxW(nullptr, ui::wtr("Put a shortcut to Amagami on the desktop and in the Start menu?\n\nYou can also make them later in General, Desktop shortcut.").c_str(),
-                    L"Amagami", MB_YESNO | MB_ICONQUESTION) != IDYES)
-        return;
-    const std::string failed = create(root);
-    if (!failed.empty()) MessageBoxW(nullptr, ui::wide(failed).c_str(), L"Amagami", MB_OK | MB_ICONWARNING);
+std::wstring wide(const std::string& text) {
+    if (text.empty()) return L"";
+    std::wstring out(size_t(MultiByteToWideChar(CP_UTF8, 0, text.data(), int(text.size()), nullptr, 0)), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.data(), int(text.size()), out.data(), int(out.size()));
+    return out;
+}
+
+// The running program (the .exe file itself), "" if unknown.
+fs::path program_file() {
+    wchar_t buffer[MAX_PATH * 4];
+    const DWORD n = GetModuleFileNameW(nullptr, buffer, DWORD(sizeof(buffer) / sizeof(buffer[0])));
+    return n > 0 && n < sizeof(buffer) / sizeof(buffer[0]) ? fs::path(std::wstring(buffer, n)) : fs::path();
+}
+
+}  // namespace
+
+std::string refresh_next_to_program(const std::string& name, const std::string& root) {
+    const fs::path exe = program_file();
+    const std::string icon = game_icon_file(root);
+    if (exe.empty() || icon.empty()) return "";  // without the game's picture a shortcut would add nothing
+    return write_link(exe.parent_path() / fs::u8path(name + ".lnk"), exe, exe.parent_path(), icon, wide(name));
+}
+
+std::string make_desktop_link(const std::string& name, const std::string& root, std::string& result) {
+    const fs::path exe = program_file();
+    if (exe.empty()) {
+        result = "the program's own file could not be found";
+        return "";
+    }
+    fs::path desktop;
+    if (const char* forced = std::getenv("AMG_DESKTOP_DIR"); forced && *forced) {  // tests: never the player's real desktop
+        desktop = fs::u8path(forced);
+    } else {
+        PWSTR known = nullptr;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Desktop, 0, nullptr, &known)) && known) desktop = fs::path(std::wstring(known));
+        CoTaskMemFree(known);
+    }
+    std::error_code ec;
+    if (desktop.empty() || !fs::is_directory(desktop, ec)) {
+        result = "the desktop folder was not found";
+        return "";
+    }
+    const fs::path lnk = desktop / fs::u8path(name + ".lnk");
+    const std::string error = write_link(lnk, exe, exe.parent_path(), game_icon_file(root), wide(name));
+    if (!error.empty()) {
+        result = error;
+        return "";
+    }
+    result = lnk.u8string();
+    return result;
 }
 
 }  // namespace amg::shortcut

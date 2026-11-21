@@ -10,37 +10,23 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <thread>
 #include <vector>
 
-#include "data_check.hpp"
-#include "datapath.hpp"
+#include "dialog.hpp"
+#include "launcher_actions.hpp"
+#include "launcher_core.hpp"
 #include "launcher_ui.hpp"
-#include "paths.hpp"
-#include "port_settings.hpp"
-#include "shortcut.hpp"
 #include "ui_text.hpp"
-#include "update_check.hpp"
-#include "updater.hpp"
 
 namespace amg::launcher {
 
 namespace {
 
-constexpr UINT WM_CHECKED = WM_APP + 1;
-constexpr UINT WM_UPDATE = WM_APP + 2;       // lParam: a new std::string with the newer release's tag
-constexpr UINT WM_FOUND = WM_APP + 3;        // lParam: a new std::vector<std::string> of the copies of the game found on the machine
-constexpr UINT WM_UPDATE_STEP = WM_APP + 4;  // lParam: a new std::string, what the update is doing now
-constexpr UINT WM_UPDATED = WM_APP + 5;      // lParam: a new std::string, "" when the update is in place, else why not
+constexpr UINT WM_CORE = WM_APP + 1;       // the core has something to apply (Core::pump)
 constexpr UINT WM_REBUILD = WM_APP + 6;      // the language or the DPI changed: the controls are made again
-
-// `base_english`: the game folder's own data is the English fan translation (the Vita3K-style patched copy).
-std::string language_name(const std::string& code, bool base_english) {
-    if (code.empty()) return ui::tr(base_english ? "This copy's own (English)" : "Original (Japanese)");
-    if (code == "en") return ui::tr("English (fan patch)");
-    return code;
-}
 
 // A row of the settings: a label and a drop-down list.
 struct Row {
@@ -72,48 +58,27 @@ struct Window {
     int header_h = 0;  // the header's height (0 over the game)
     int line_h = 16;   // the height of a line of the body font
     COLORREF pane = PANE;  // the colour of the tab's pane as the theme draws it
-    // The launcher's own state.
-    std::string root, result;
-    std::vector<Check> checks;
-    bool checking = false;
-    int generation = 0;
+    // The launcher's state and its worker threads are the component's core; this window only draws it.
+    Core core;
     HWND start = nullptr, update = nullptr, found = nullptr, fix = nullptr, checks_view = nullptr;
     HICON icon = nullptr;
-    std::string update_tag;
-    std::string update_text;  // what the update button says while it works ("" for the usual text)
-    bool updating = false;
-    std::vector<std::string> copies;  // usable copies of the game found on this machine (offered when the folder is not usable)
-    bool searched = false;
     int scroll = 0;  // of the list of checks
     int checks_height = -1;  // the list's height when the scroll bar was last set
 };
 
-struct Answer {
-    int generation;
-    std::vector<Check> checks;
-};
-
-bool not_usable(const Window& w) { return !w.checking && !usable(w.checks); }
+bool not_usable(const Window& w) { return w.core.not_usable(); }
 
 // --- The rows -----------------------------------------------------------------------------------------------------------
 
 Row row_for(const Window& w, const std::string& key) {
     Row r;
     r.key = key;
-    if (key == "lang") {  // the game's language: the layers found in the game's folder
-        r.label = "Language";
-        r.values.push_back("");
-        std::error_code ec;
-        const std::filesystem::path layers = std::filesystem::u8path(w.root) / "lang";
-        if (!w.root.empty() && std::filesystem::is_directory(layers, ec))
-            for (const auto& e : std::filesystem::directory_iterator(layers, ec))
-                if (e.is_directory(ec)) r.values.push_back(e.path().filename().string());
-        const bool base_english = !w.root.empty() && known_label(data_file(w.root, "AMAGAMI.IMG"), "AMAGAMI.IMG").find("English") != std::string::npos;
-        const std::string current = w.svc->read_setting("lang");
-        for (size_t i = 0; i < r.values.size(); ++i) {
-            r.names.push_back(language_name(r.values[i], base_english));
-            if (r.values[i] == current) r.index = int(i);
-        }
+    if (w.svc->variants && key == w.svc->variant_key) {  // the variants of the game's data (Amagami: the language layers)
+        const SettingRow v = w.svc->variants(w.core.root);
+        r.label = v.label;
+        r.values = v.values;
+        r.names = v.names;
+        r.index = v.index;
     } else if (key == "ui_lang") {  // the language of these windows
         r.label = "Launcher language";
         r.values = {"", "en", "es", "ja"};
@@ -121,8 +86,8 @@ Row row_for(const Window& w, const std::string& key) {
         const std::string current = w.svc->read_setting("ui_lang");
         for (size_t i = 0; i < r.values.size(); ++i)
             if (r.values[i] == current) r.index = int(i);
-    } else {
-        for (const port_settings::RowInfo& info : port_settings::all_rows())
+    } else if (w.svc->rows) {
+        for (const SettingRow& info : w.svc->rows())
             if (info.key == key) {
                 r.label = info.label;
                 r.values = info.values;
@@ -133,16 +98,13 @@ Row row_for(const Window& w, const std::string& key) {
     return r;
 }
 
-// The keys of the settings tabs. A row of port_settings.cpp that none names goes to General.
-const std::vector<std::string> GENERAL = {"ui_lang", "launcher", "updates", "splash"};
-const std::vector<std::string> DISPLAY = {"window", "uiscale", "render", "filter", "aspect", "brightness", "gamma", "vsync", "fps"};
-const std::vector<std::string> CONTROLS = {"glyphs", "confirm", "fallback"};
-
-std::vector<std::string> general_keys() {
-    std::vector<std::string> keys = GENERAL;
-    for (const port_settings::RowInfo& info : port_settings::all_rows()) {
+// The keys of the settings tabs come from the project; a row that none names goes to General.
+std::vector<std::string> general_keys(const ProjectSpec& spec) {
+    std::vector<std::string> keys = spec.general_keys;
+    if (!spec.rows) return keys;
+    for (const SettingRow& info : spec.rows()) {
         auto named = [&](const std::vector<std::string>& v) { return std::find(v.begin(), v.end(), info.key) != v.end(); };
-        if (!named(GENERAL) && !named(DISPLAY) && !named(CONTROLS)) keys.push_back(info.key);
+        if (!named(spec.general_keys) && !named(spec.display_keys) && !named(spec.controls_keys)) keys.push_back(info.key);
     }
     return keys;
 }
@@ -219,7 +181,7 @@ void layout_header(Window& w) {
     const Scale& s = w.s;
     const bool bad = not_usable(w);
     const Check* failed = nullptr;
-    for (const Check& c : w.checks)
+    for (const Check& c : w.core.checks)
         if (c.status == Check::Fail) {
             failed = &c;
             break;
@@ -228,10 +190,10 @@ void layout_header(Window& w) {
     if (failed && failed->what == "Executable") fix_label = ui::wtr("Choose original folder...");
     SetWindowTextW(w.fix, fix_label.c_str());
     ShowWindow(w.fix, bad ? SW_SHOW : SW_HIDE);
-    ShowWindow(w.found, bad && !w.copies.empty() ? SW_SHOW : SW_HIDE);
-    ShowWindow(w.update, w.update_tag.empty() ? SW_HIDE : SW_SHOW);
-    if (!w.update_tag.empty())
-        SetWindowTextW(w.update, w.update_text.empty() ? ui::wfmt("Get the new version, {0}", {w.update_tag}).c_str() : widen(w.update_text).c_str());
+    ShowWindow(w.found, bad && !w.core.copies.empty() ? SW_SHOW : SW_HIDE);
+    ShowWindow(w.update, w.core.update_tag.empty() ? SW_HIDE : SW_SHOW);
+    if (!w.core.update_tag.empty())
+        SetWindowTextW(w.update, w.core.update_text.empty() ? ui::wfmt("Get the new version, {0}", {w.core.update_tag}).c_str() : widen(w.core.update_text).c_str());
     RECT start;
     GetWindowRect(w.start, &start);
     MapWindowPoints(nullptr, w.win, reinterpret_cast<POINT*>(&start), 2);
@@ -247,13 +209,21 @@ void layout_header(Window& w) {
         SetWindowPos(b, nullptr, x, y, std::max(s(60), width), s(30), SWP_NOZORDER | SWP_NOACTIVATE);
         x += width + s(10);
     }
-    EnableWindow(w.start, !w.checking && !w.updating && usable(w.checks));
+    EnableWindow(w.start, !w.core.checking && !w.core.updating && usable(w.core.checks));
     InvalidateRect(w.win, nullptr, FALSE);
+}
+
+// The game's icon at `size` pixels, from the .ico the project names for this copy; nullptr when there is none.
+HICON game_icon(const ProjectSpec& spec, const std::string& root, int size) {
+    if (root.empty() || !spec.icon_file) return nullptr;
+    const std::string file = spec.icon_file(root);
+    if (file.empty()) return nullptr;
+    return HICON(LoadImageW(nullptr, std::filesystem::u8path(file).wstring().c_str(), IMAGE_ICON, size, size, LR_LOADFROMFILE));
 }
 
 void load_icon(Window& w) {
     if (w.icon) DestroyIcon(w.icon);
-    w.icon = w.root.empty() ? nullptr : shortcut::load_game_icon(w.root, w.s(48));
+    w.icon = game_icon(*w.svc, w.core.root, w.s(48));
 #ifdef AMG_HAS_ICON
     if (!w.icon) w.icon = HICON(LoadImageW(w.inst, MAKEINTRESOURCEW(1), IMAGE_ICON, w.s(48), w.s(48), 0));
 #endif
@@ -279,7 +249,11 @@ COLORREF pane_colour(HWND tabs) {
 }
 
 void build(Window& w) {
-    // Everything is made again: the first time, after the language changed and after the DPI changed.
+    // Everything is made again: the first time, after the language changed and after the DPI changed. The window is not
+    // painted while it is made: every control starts visible and only `show_page` hides those of the other tabs, so a
+    // slow moment showed all the tabs at once, broken, before the right one (seen when a bad game folder made the launcher
+    // build itself a second time).
+    SendMessageW(w.win, WM_SETREDRAW, FALSE, 0);
     for (HWND c = GetWindow(w.win, GW_CHILD); c; c = GetWindow(w.win, GW_CHILD)) DestroyWindow(c);
     w.pages.clear();
     w.rows.clear();
@@ -303,16 +277,16 @@ void build(Window& w) {
     w.header_h = w.in_game ? 0 : s(52) + 2 * w.line_h + s(10) + s(30) + s(14);
 
     if (!w.in_game) {
-        SetWindowTextW(w.win, L"Amagami");
+        SetWindowTextW(w.win, widen(w.svc->name).c_str());
         const std::wstring start_text = ui::wtr("Start game");
         const int start_w = std::max(s(160), text_width(w.fonts.bold, start_text) + s(40));
         w.found = make_button(w.win, L"", ID_FOUND, 0, 0, s(10), s(30), w.fonts.bold);
         w.fix = make_button(w.win, ui::wtr("Choose game folder..."), ID_FOLDER, 0, 0, s(10), s(30), w.fonts.body);
         w.update = make_button(w.win, L"", ID_UPDATE, 0, 0, s(10), s(30), w.fonts.bold);
         w.start = make_button(w.win, start_text, ID_START, W - s(24) - start_w, s(48), start_w, s(48), w.fonts.bold, true);
-        if (!w.copies.empty()) {
+        if (!w.core.copies.empty()) {
             // "Use the copy found in your Vita3K" or in the folder's own name, not the whole path (it does not fit)
-            const std::string& found = w.copies.front();
+            const std::string& found = w.core.copies.front();
             std::string label = found;
             const size_t cut = found.find_last_of("/\\");
             if (cut != std::string::npos && cut + 1 < found.size()) label = found.substr(cut + 1);
@@ -352,7 +326,7 @@ void build(Window& w) {
 
     if (!w.in_game) {  // Game files: the list of checks at the left, the language and the folder's buttons at the right
         Page& page = w.pages[size_t(p++)];
-        const std::vector<std::wstring> texts = {ui::wtr("Choose game folder..."), ui::wtr("Add English patch..."), ui::wtr("Open saves folder"),
+        const std::vector<std::wstring> texts = {ui::wtr("Choose game folder..."), ui::wtr(w.svc->add_variant_label), ui::wtr("Open saves folder"),
                                                  ui::wtr("Delete copy of the game...")};
         const int right_w = std::min(area.w * 2 / 5, button_width(w, texts, s(200)));
         const int rx = area.x + area.w - right_w;
@@ -376,17 +350,17 @@ void build(Window& w) {
     }
     {  // General
         Page& page = w.pages[size_t(p++)];
-        const int bottom = add_rows(w, page, general_keys(), {area.x, area.y, half, area.h}, 1);
-        const std::wstring text = w.in_game ? ui::wtr("Open saves folder") : ui::wtr("Desktop shortcut");
-        page_button(w, page, text, w.in_game ? ID_SAVES : ID_SHORTCUT, area.x, bottom + s(12), button_width(w, {text}, s(160)));
+        const int bottom = add_rows(w, page, general_keys(*w.svc), {area.x, area.y, half, area.h}, 1);
+        const std::wstring text = ui::wtr("Open saves folder");
+        page_button(w, page, text, ID_SAVES, area.x, bottom + s(12), button_width(w, {text}, s(160)));
     }
     {  // Display
         Page& page = w.pages[size_t(p++)];
-        add_rows(w, page, DISPLAY, area, 2);
+        add_rows(w, page, w.svc->display_keys, area, 2);
     }
     {  // Controls: the rows at the left, the two windows at the right with a line on what each is for
         Page& page = w.pages[size_t(p++)];
-        add_rows(w, page, CONTROLS, {area.x, area.y, half, area.h}, 1);
+        add_rows(w, page, w.svc->controls_keys, {area.x, area.y, half, area.h}, 1);
         const int rx = area.x + half + s(24);
         const std::vector<std::wstring> texts = {ui::wtr("Controls..."), ui::wtr("Pad mapping...")};
         const int bw = button_width(w, texts, s(160));
@@ -399,32 +373,17 @@ void build(Window& w) {
     SetWindowPos(w.tabs, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     show_page(w, w.tab);
     layout_header(w);
-    InvalidateRect(w.win, nullptr, TRUE);
+    SendMessageW(w.win, WM_SETREDRAW, TRUE, 0);
+    RedrawWindow(w.win, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 }
 
 // --- The checks -----------------------------------------------------------------------------------------------------------
 
 void recheck(Window& w) {
-    w.checking = true;
-    w.checks.clear();
+    w.core.recheck();
     w.scroll = 0;
-    const int generation = ++w.generation;
-    const std::string root = w.root;
-    HWND hwnd = w.win;
     layout_header(w);
     if (w.checks_view) InvalidateRect(w.checks_view, nullptr, TRUE);
-    std::thread([hwnd, root, generation] {
-        std::vector<Check> checks;
-        try {
-            checks = check_data(root);
-        } catch (const std::exception& e) {  // a thread that throws would end the whole program
-            checks = {{Check::Fail, "Game folder", ui::fmt("This folder could not be checked ({0}). Choose another folder, or check that you can read it.", {e.what()})}};
-        } catch (...) {
-            checks = {{Check::Fail, "Game folder", ui::fmt("This folder could not be checked ({0}). Choose another folder, or check that you can read it.", {"?"})}};
-        }
-        auto* a = new Answer{generation, std::move(checks)};
-        if (!PostMessageW(hwnd, WM_CHECKED, 0, LPARAM(a))) delete a;
-    }).detach();
 }
 
 // A round mark with a tick, a cross or an exclamation mark, drawn with lines (the fonts have no check mark that is the
@@ -470,18 +429,18 @@ int paint_checks(Window& w, HDC dc, const RECT& box, int offset) {
     SelectObject(dc, w.fonts.body);
     SetTextColor(dc, MUTED);
     {
-        const std::wstring folder = w.root.empty() ? ui::wtr("No folder chosen yet.") : ui::wfmt("Folder: {0}", {w.root});
+        const std::wstring folder = w.core.root.empty() ? ui::wtr("No folder chosen yet.") : ui::wfmt("Folder: {0}", {w.core.root});
         RECT r = {box.left, y, box.right, y + s(20)};
         DrawTextW(dc, folder.c_str(), -1, &r, DT_LEFT | DT_SINGLELINE | DT_PATH_ELLIPSIS | DT_NOPREFIX);
         y += s(28);
     }
-    if (w.checking) {
+    if (w.core.checking) {
         RECT r = {box.left, y, box.right, y + s(20)};
         DrawTextW(dc, ui::wtr("Checking your game folder...").c_str(), -1, &r, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
         y += s(24);
     }
     const int mark = s(20), indent = mark + s(10);
-    for (const Check& c : w.checks) {
+    for (const Check& c : w.core.checks) {
         draw_mark(dc, box.left, y + s(1), mark, int(c.status), std::max(1, s(2)));
         SelectObject(dc, w.fonts.bold);
         SetTextColor(dc, INK);
@@ -495,7 +454,7 @@ int paint_checks(Window& w, HDC dc, const RECT& box, int offset) {
         DrawTextW(dc, detail.c_str(), -1, &text, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
         y = text.bottom + s(12);
     }
-    if (!w.checking && !usable(w.checks)) {  // what can always be done
+    if (!w.core.checking && !usable(w.core.checks)) {  // what can always be done
         SetTextColor(dc, MUTED);
         RECT hint = {box.left, y, box.right, y + s(200)};
         const std::wstring text = ui::wtr("Choose your own decrypted PS Vita copy, or drop its folder here.");
@@ -580,7 +539,7 @@ LRESULT CALLBACK checks_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 void name_checks(Window& w) {
     if (!w.checks_view) return;
     std::wstring all;
-    for (const Check& c : w.checks) all += ui::wtr(c.what) + L": " + widen(c.detail) + L"\n";
+    for (const Check& c : w.core.checks) all += ui::wtr(c.what) + L": " + widen(c.detail) + L"\n";
     SetWindowTextW(w.checks_view, all.c_str());
     InvalidateRect(w.checks_view, nullptr, TRUE);
 }
@@ -604,34 +563,16 @@ void paint_header(Window& w, HDC dc, const RECT& client) {
     SelectObject(dc, w.fonts.title);
     SetTextColor(dc, INK);
     RECT r = {s(84), s(10), start.left - s(16), s(50)};
-    DrawTextW(dc, L"Amagami", -1, &r, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
+    DrawTextW(dc, widen(w.svc->name).c_str(), -1, &r, DT_LEFT | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(dc, w.fonts.body);
     SetTextColor(dc, MUTED);
     r = {s(84), s(18), client.right - s(24), s(40)};
-    DrawTextW(dc, (L"open-amagami " + widen(update_check::current())).c_str(), -1, &r, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
-    // The status: a mark and one or two lines.
-    int status = Check::Ok;
-    std::wstring text;
-    const Check* failed = nullptr;
-    for (const Check& c : w.checks)
-        if (c.status == Check::Fail && !failed) failed = &c;
-    bool warned = false;
-    for (const Check& c : w.checks) warned = warned || c.status == Check::Warn;
-    if (w.checking) {
-        status = -1;
-        text = ui::wtr("Checking your game folder...");
-    } else if (w.checks.empty()) {
-        status = Check::Warn;
-        text = ui::wtr("Choose the folder of your own copy of the game to begin.");
-    } else if (failed) {
-        status = Check::Fail;
-        text = failed->what == "Executable"
-                   ? ui::wtr("Choose the original game folder, then add the English patch.")
-                   : ui::wtr(failed->what) + L": " + widen(failed->detail);
-    } else {
-        status = warned ? Check::Warn : Check::Ok;
-        text = ui::wtr("Your game is ready. In the game, F8 opens the options.");
-    }
+    DrawTextW(dc, widen(w.svc->product + " " + (w.svc->version ? w.svc->version() : std::string())).c_str(), -1, &r, DT_RIGHT | DT_SINGLELINE | DT_NOPREFIX);
+    // The status: a mark and one or two lines (the core's view model decides what they say).
+    const ViewModel view = w.core.view();
+    const bool failed = view.status_bold;
+    const int status = view.status;
+    const std::wstring text = widen(view.status_text);
     draw_mark(dc, s(84), s(54) + (w.line_h - s(16)) / 2, s(16), status, std::max(1, s(2)));
     SelectObject(dc, failed ? w.fonts.bold : w.fonts.body);
     SetTextColor(dc, INK);
@@ -649,11 +590,19 @@ void paint_header(Window& w, HDC dc, const RECT& client) {
 
 void choose(Window& w, const std::string& chosen) {
     if (chosen.empty()) return;
-    w.root = chosen;
-    w.copies.clear();
+    w.core.root = chosen;
+    w.core.copies.clear();
     load_icon(w);
     PostMessageW(w.win, WM_REBUILD, 0, 0);  // the Language row lists the layers of the new folder
     recheck(w);
+}
+
+// A question or a notice over the window `owner`, through the program's dialog service (a window system's box, a script, a terminal).
+dialog::Reply box(HWND owner, const std::string& text, dialog::Buttons buttons, dialog::Icon icon, bool default_no = false) {
+    dialog::current().set_owner(owner);
+    const dialog::Reply reply = dialog::show(text, buttons, icon, default_no);
+    dialog::current().set_owner(nullptr);
+    return reply;
 }
 
 void command(Window& w, int id, int note) {
@@ -664,47 +613,39 @@ void command(Window& w, int id, int note) {
         const int pick = int(SendMessageW(row.combo, CB_GETCURSEL, 0, 0));
         if (pick < 0 || size_t(pick) >= row.values.size()) return;
         const std::string& value = row.values[size_t(pick)];
-        if (row.key == "lang") {
-            w.svc->write_setting("lang", value);
+        if (w.svc->variants && row.key == w.svc->variant_key) {
+            w.svc->write_setting(w.svc->variant_key, value);
         } else if (row.key == "ui_lang") {
             w.svc->write_setting("ui_lang", value);
             ui::init(value);
             PostMessageW(hwnd, WM_REBUILD, 0, 0);  // every text in the new language at once
-        } else {
-            port_settings::set_value(row.key, value);
+        } else if (w.svc->set_row) {
+            w.svc->set_row(row.key, value);
         }
         return;
     }
     switch (id) {
         case ID_SAVES: {
+            const std::string saves = w.svc->saves_dir ? w.svc->saves_dir() : std::string();
+            if (saves.empty()) break;
             std::error_code ec;
-            std::filesystem::create_directories(std::filesystem::u8path(paths::save_dir()), ec);
-            ShellExecuteA(nullptr, "open", paths::save_dir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            std::filesystem::create_directories(std::filesystem::u8path(saves), ec);
+            ShellExecuteA(nullptr, "open", saves.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             break;
         }
         case ID_CONTROLS:
-            show_controls(hwnd, w.inst, *w.svc);
+            if (w.svc->show_controls) w.svc->show_controls(hwnd, w.inst);
             break;
         case ID_PAD:
-            show_pad_mapping(hwnd, w.inst);
+            if (w.svc->show_pad_mapping) w.svc->show_pad_mapping(hwnd, w.inst);
             break;
-        case ID_SHORTCUT: {
-            const std::string failed = shortcut::create(w.root);
-            MessageBoxW(hwnd, failed.empty() ? ui::wtr("Amagami is now on the desktop and in the Start menu.").c_str() : widen(failed).c_str(), L"Amagami",
-                        MB_OK | (failed.empty() ? MB_ICONINFORMATION : MB_ICONWARNING));
-            break;
-        }
         case ID_DELETE: {
-            const std::string copy = paths::game_dir();
-            std::error_code ec;
-            if (copy.empty() || !std::filesystem::exists(copy, ec)) {
-                MessageBoxW(hwnd, ui::wtr("There is no copy of the game in the program's own folder.").c_str(), L"Amagami", MB_OK | MB_ICONINFORMATION);
-            } else if (MessageBoxW(hwnd, ui::wfmt("Delete the copy of the game in:\n{0}\n\nYour saves and settings are kept. You can copy the game again from your own folder.", {copy}).c_str(),
-                                   L"Amagami", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES) {
-                std::filesystem::remove_all(std::filesystem::u8path(copy), ec);
-                if (w.svc->read_setting("root") == copy) w.svc->write_setting("root", "");
-                w.root = w.svc->read_setting("root");
-                w.searched = false;  // look for a copy again
+            dialog::current().set_owner(hwnd);
+            const DeleteResult deleted = delete_copy(*w.svc);
+            dialog::current().set_owner(nullptr);
+            if (deleted == DeleteResult::Deleted) {
+                w.core.root = w.svc->read_setting("root");
+                w.core.searched = false;  // look for a copy again
                 load_icon(w);
                 PostMessageW(hwnd, WM_REBUILD, 0, 0);
                 recheck(w);
@@ -712,7 +653,7 @@ void command(Window& w, int id, int note) {
             break;
         }
         case ID_ENGLISH:
-            if (w.svc->add_english && w.svc->add_english(w.root)) {
+            if (w.svc->add_variant && w.svc->add_variant(w.core.root, "")) {
                 PostMessageW(hwnd, WM_REBUILD, 0, 0);  // the Language row lists the new layer
                 recheck(w);                            // and the Language check says so
             }
@@ -721,21 +662,14 @@ void command(Window& w, int id, int note) {
             choose(w, w.svc->choose_folder());
             break;
         case ID_FOUND:
-            if (!w.copies.empty() && w.svc->use_copy) choose(w, w.svc->use_copy(w.copies.front()));
+            if (!w.core.copies.empty() && w.svc->use_copy) choose(w, w.svc->use_copy(w.core.copies.front()));
             break;
         case ID_UPDATE: {
-            if (w.updating || w.update_tag.empty()) break;
-            const std::wstring ask = ui::wfmt("Download and install {0} now? The program restarts when it is done.", {w.update_tag});
-            if (MessageBoxW(hwnd, ask.c_str(), L"Amagami", MB_YESNO | MB_ICONQUESTION) == IDYES) {
-                w.updating = true;
-                w.update_text = ui::tr("Downloading...");
+            if (w.core.updating || w.core.update_tag.empty()) break;
+            const std::string ask = ui::fmt("Download and install {0} now? The program restarts when it is done.", {w.core.update_tag});
+            if (box(hwnd, ask, dialog::Buttons::YesNo, dialog::Icon::Question) == dialog::Reply::Yes) {
+                w.core.install_update();
                 layout_header(w);
-                std::thread([hwnd, tag = w.update_tag] {
-                    const std::string result = updater::install(tag, [hwnd](const std::string& step) {
-                        PostMessageW(hwnd, WM_UPDATE_STEP, 0, LPARAM(new std::string(step)));
-                    });
-                    PostMessageW(hwnd, WM_UPDATED, 0, LPARAM(new std::string(result)));
-                }).detach();
             }
             break;
         }
@@ -743,7 +677,7 @@ void command(Window& w, int id, int note) {
             if (w.in_game) {
                 DestroyWindow(hwnd);  // Enter over the game: Close
             } else if (w.start && IsWindowEnabled(w.start)) {
-                w.result = w.root;
+                w.core.result = w.core.root;
                 DestroyWindow(hwnd);
             }
             break;
@@ -751,6 +685,15 @@ void command(Window& w, int id, int note) {
             DestroyWindow(hwnd);
             break;
     }
+}
+
+// Test hook: AMG_LAUNCHER_DUMP=FILE writes what the launcher shows, as text, once it has settled (the checks are in and, when the
+// folder is not usable, the search for copies has answered), so a check can assert the outcome of a scenario without reading
+// pixels. Without the variable nothing happens.
+void dump_state(const Window& w) {
+    const char* path = std::getenv("AMG_LAUNCHER_DUMP");
+    if (!path || !*path || w.in_game) return;
+    w.core.write_dump(path);
 }
 
 LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -811,40 +754,44 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 name_checks(*w);
             }
             return 0;
-        case WM_UPDATE: {
-            std::unique_ptr<std::string> tag(reinterpret_cast<std::string*>(lp));
-            w->update_tag = *tag;
-            layout_header(*w);
-            return 0;
-        }
-        case WM_UPDATE_STEP: {
-            std::unique_ptr<std::string> step(reinterpret_cast<std::string*>(lp));
-            w->update_text = *step;
-            layout_header(*w);
-            return 0;
-        }
-        case WM_UPDATED: {
-            std::unique_ptr<std::string> result(reinterpret_cast<std::string*>(lp));
-            w->updating = false;
-            w->update_text.clear();
-            if (result->empty()) {  // the new files are in place: start the new program and leave this one
-                if (!updater::restart())
-                    MessageBoxW(hwnd, ui::wtr("The update is installed. Start the program again to use it.").c_str(), L"Amagami", MB_OK | MB_ICONINFORMATION);
-                DestroyWindow(hwnd);
-            } else {
-                layout_header(*w);
-                const std::wstring text = widen(*result) + L"\n\n" + ui::wtr("Open the download page instead?");
-                if (MessageBoxW(hwnd, text.c_str(), L"Amagami", MB_YESNO | MB_ICONWARNING) == IDYES)
-                    ShellExecuteW(nullptr, L"open", update_check::PAGE, nullptr, nullptr, SW_SHOWNORMAL);
-            }
-            return 0;
-        }
-        case WM_FOUND: {
-            std::unique_ptr<std::vector<std::string>> v(reinterpret_cast<std::vector<std::string>*>(lp));
-            if (!v->empty() && !usable(w->checks)) {
-                w->copies = *v;
-                build(*w);  // the button's text
-                name_checks(*w);
+        case WM_CORE: {  // the core's workers finished something: it is applied, and the window reacts to each thing
+            for (const Core::Event& e : w->core.pump()) {
+                switch (e.kind) {
+                    case Core::Kind::UpdateTag:
+                    case Core::Kind::UpdateStep:
+                        layout_header(*w);
+                        break;
+                    case Core::Kind::Updated:
+                        if (e.text.empty()) {  // the new files are in place: start the new program and leave this one
+                            if (!(w->svc->updates.restart && w->svc->updates.restart()))
+                                box(hwnd, ui::tr("The update is installed. Start the program again to use it."), dialog::Buttons::Ok, dialog::Icon::Info);
+                            DestroyWindow(hwnd);
+                            return 0;
+                        }
+                        layout_header(*w);
+                        {
+                            const std::string text = e.text + "\n\n" + ui::tr("Open the download page instead?");
+                            if (box(hwnd, text, dialog::Buttons::YesNo, dialog::Icon::Warning) == dialog::Reply::Yes)
+                                ShellExecuteW(nullptr, L"open", w->svc->updates.page.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                        }
+                        break;
+                    case Core::Kind::Found:
+                        if (e.applied) {
+                            build(*w);  // the button's text
+                            name_checks(*w);
+                        }
+                        dump_state(*w);
+                        break;
+                    case Core::Kind::Checked:
+                        name_checks(*w);
+                        if (!usable(w->core.checks)) {
+                            show_page(*w, game_files_tab(*w));  // the full list, with what to do
+                            w->core.search_copies_once();       // look for a copy of the game by ourselves, once
+                        }
+                        layout_header(*w);
+                        if (usable(w->core.checks) || !w->svc->find_copies) dump_state(*w);  // otherwise after the search for copies answers
+                        break;
+                }
             }
             return 0;
         }
@@ -854,25 +801,6 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 if (DragQueryFileW(HDROP(wp), 0, path, UINT(sizeof path / sizeof path[0])) > 0) choose(*w, w->svc->use_copy(narrow(path)));
             }
             DragFinish(HDROP(wp));
-            return 0;
-        }
-        case WM_CHECKED: {
-            std::unique_ptr<Answer> a(reinterpret_cast<Answer*>(lp));
-            if (a->generation != w->generation) return 0;
-            w->checking = false;
-            w->checks = std::move(a->checks);
-            name_checks(*w);
-            if (!usable(w->checks)) {
-                show_page(*w, game_files_tab(*w));  // the full list, with what to do
-                if (!w->searched && w->svc->find_copies) {  // look for a copy of the game by ourselves, once
-                    w->searched = true;
-                    std::thread([hwnd, find = w->svc->find_copies] {
-                        auto* v = new std::vector<std::string>(find());
-                        if (!PostMessageW(hwnd, WM_FOUND, 0, LPARAM(v))) delete v;
-                    }).detach();
-                }
-            }
-            layout_header(*w);
             return 0;
         }
         case WM_COMMAND:
@@ -923,7 +851,7 @@ void open(Window& w, HWND parent, int width, int height) {
     if (auto adjust = reinterpret_cast<AdjustForDpi>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi")))
         adjust(&rc, style, FALSE, 0, UINT(w.s.dpi));
     else AdjustWindowRect(&rc, style, FALSE);
-    w.win = CreateWindowW(L"AmagamiLauncher", L"Amagami", style, CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top, parent, nullptr,
+    w.win = CreateWindowW(L"AmagamiLauncher", widen(w.svc->name).c_str(), style, CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top, parent, nullptr,
                           w.inst, nullptr);
     SetWindowLongPtrW(w.win, GWLP_USERDATA, LONG_PTR(&w));
     place(w.win);
@@ -970,7 +898,7 @@ void dpi_aware_thread() {
 
 }  // namespace
 
-void show_game_settings(HWND parent, HINSTANCE inst, const Services& services) {
+void show_game_settings(HWND parent, HINSTANCE inst, const ProjectSpec& services) {
     register_classes(inst);
     Window w;
     w.inst = inst;
@@ -985,32 +913,28 @@ void show_game_settings(HWND parent, HINSTANCE inst, const Services& services) {
     w.fonts.free();
 }
 
-std::string run(HINSTANCE inst, const std::string& root, const Services& services) {
+std::string run(HINSTANCE inst, const std::string& root, const ProjectSpec& spec) {
     dpi_aware_thread();
     register_classes(inst);
     Window w;
     w.inst = inst;
-    w.svc = &services;
-    w.root = root;
+    w.svc = &spec;
+    w.core.spec = &spec;
+    w.core.root = root;
     open(w, nullptr, 760, 520);
+    w.core.wake = [hwnd = w.win] { PostMessageW(hwnd, WM_CORE, 0, 0); };
     if (!root.empty()) {  // the title bar and the taskbar show the game's icon from the player's copy
-        if (HICON big = shortcut::load_game_icon(root, GetSystemMetrics(SM_CXICON))) SendMessageW(w.win, WM_SETICON, ICON_BIG, LPARAM(big));
-        if (HICON little = shortcut::load_game_icon(root, GetSystemMetrics(SM_CXSMICON))) SendMessageW(w.win, WM_SETICON, ICON_SMALL, LPARAM(little));
+        if (HICON big = game_icon(spec, root, GetSystemMetrics(SM_CXICON))) SendMessageW(w.win, WM_SETICON, ICON_BIG, LPARAM(big));
+        if (HICON little = game_icon(spec, root, GetSystemMetrics(SM_CXSMICON))) SendMessageW(w.win, WM_SETICON, ICON_SMALL, LPARAM(little));
     }
     DragAcceptFiles(w.win, TRUE);
-    if (services.read_setting("updates") != "off") {
-        HWND hwnd = w.win;
-        std::thread([hwnd] {
-            const std::string tag = update_check::latest();
-            if (update_check::is_newer(tag) && IsWindow(hwnd)) PostMessageW(hwnd, WM_UPDATE, 0, LPARAM(new std::string(tag)));
-        }).detach();
-    }
+    w.core.check_for_update();
     recheck(w);
     show(w.win);
     run_loop(w);
     w.fonts.free();
     if (w.icon) DestroyIcon(w.icon);
-    return w.result;
+    return w.core.result;
 }
 
 }  // namespace amg::launcher

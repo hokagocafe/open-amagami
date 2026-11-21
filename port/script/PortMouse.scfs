@@ -49,8 +49,50 @@ const symbol "setCursor"
 const symbol "move"
 const symbol "focas"
 const symbol "setMissTens"
+const class "EventNode"
+const class "Array"
+const symbol "focus"
+const symbol "setGuide"
+const symbol "moveCursor"
+const symbol "getPos"
+const symbol "getTag"
+const symbol "setLastFocus"
+const symbol "setLocal"
+const symbol "jump"
+const symbol "mapAfter"
+const symbol "getPosX"
+const symbol "getPosY"
+const symbol "getNode"
+const symbol "getMess"
+const symbol "message"
+const symbol "title"
+const symbol "setAlpha"
+const symbol "setText"
+const symbol "fade"
 const float 0x40400000 ; 3.0
 const float 0x40c00000 ; 6.0
+const float 0xc2d60000 ; -107.0
+const float 0xc2940000 ; -74.0
+const float 0x42800000 ; 64.0
+const float 0x42380000 ; 46.0
+const float 0x00000000 ; 0.0
+const float 0x3f800000 ; 1.0
+const float 0x3f000000 ; 0.5
+const float 0x41c00000 ; 24.0
+const float 0x41e00000 ; 28.0
+const float 0xc2800000 ; -64.0
+const float 0x41d00000 ; 26.0
+const symbol "setAll"
+const symbol "getMentsu"
+const symbol "setInfo"
+const symbol "focusAll"
+const symbol "getGauge"
+const symbol "show"
+const symbol "close"
+const symbol "destruct"
+const symbol "new"
+const class "Heroine"
+const class "FavorGauge"
 ; The native mouse (docs/technical/mouse-native-design.md, src/mouse_menus.hpp): run in its own short script thread when
 ; the entry under the mouse changes. It does what the owner's loop does for one pad move, but to the entry in one step:
 ; the owner's move sound, the menu's own direct move (CommandMenu.moveCursor sets nextCurY and the move state, which
@@ -208,4 +250,143 @@ method "name" args=2 locals=0 {
     if (arg1 > 0 and arg1 < 7) {
         Sound.playSE(33);
     }
+}
+; The album's list of heroines (AlbumMain.scriptMain arg0, its CommandMenu arg1, the heroines shown arg3): entry arg2,
+; as its loop does for up or down (sound 32, the menu's move, the owner's copy of the index, the heroine's page).
+method "album" args=4 locals=1 {
+    Sound.playSE(32);
+    loc0 = arg1.moveCursor(arg2);
+    PortMouse.mirror(loc0);
+    arg0.openPage(arg3[loc0]);
+}
+; The album's pictures (AlbumMain.selectPicture): its arrow arg0 to column arg1, row arg2 (the native has written the
+; loop's own copies), as the loop does for one pad move (sound 31, the arrow slides there in 6 frames).
+method "albumCell" args=3 locals=0 {
+    Sound.playSE(31);
+    arg0.move(-107.0f + arg1 * 64.0f, -74.0f + arg2 * 46.0f, 1, 6.0f);
+}
+; The history (HistoryView arg0, the title line arg1 of HistoryMain.scriptMain): day arg2 of the page, time arg3, as
+; HistoryView.moveCursor and the owner's loop do for one pad move (sound 31, the cursor, the message and the title).
+method "history" args=4 locals=2 {
+    Sound.playSE(31);
+    PortSettings.setField(arg0, "posX", arg2);
+    PortSettings.setField(arg0, "posY", arg3);
+    loc0 = PortSettings.field(arg0, "ahd")[PortSettings.field(arg0, "page") * 7 + arg2];
+    PortSettings.field(arg0, "cursor").move(loc0.getPosX(), loc0.getPosY(arg3));
+    loc1 = arg0.getNode();
+    if (loc1 != nil) {
+        K2X_Script.cvar6.getMess().set(loc1.message());
+        arg1.setAlpha(0.0f).setText(loc1.title()).fade(1.0f, 1, 6.0f);
+    } else {
+        K2X_Script.cvar6.getMess().set(nil);
+        arg1.fade(0.0f, 1, 6.0f);
+    }
+}
+; The mahjong's title menu (Mahjong.titleMenu arg0, its TitleMenu arg1): entry arg2, as the loop does for up or down
+; (sound 32, the menu's own direct move, the owner's copy in its cursor).
+method "titleMenu" args=3 locals=0 {
+    Sound.playSE(32);
+    PortSettings.setField(arg0, "cursor", arg1.moveCursor(arg2));
+}
+; The day map (NodeMap arg0): its cursor to cell arg1, arg2 inside the still part of the view, as NodeMap.move ends a
+; step there (sound 31, the cell's panels, the view and the guide, the cursor's corners), then the owner's part (arg3:
+; nil for NodeMapMain.selectNode, the FreePlay for free play).
+method "mapCell" args=4 locals=0 {
+    PortSettings.setField(arg0, "posX", arg1);
+    PortSettings.setField(arg0, "posY", arg2);
+    Sound.playSE(31);
+    arg0.focus();
+    PortSettings.field(arg0, "view").move(0.5f + PortSettings.field(arg0, "mapX"), PortSettings.field(arg0, "mapY"), 0, 6.0f);
+    PortSettings.field(arg0, "navi").moveCursor(PortSettings.field(arg0, "mapX"), PortSettings.field(arg0, "mapY"), 0, 6.0f);
+    arg0.setGuide();
+    PortSettings.field(arg0, "mcur").move(24.0f * (arg1 - PortSettings.field(arg0, "mapX")) - 64.0f, 28.0f * (0.5f * (1 - arg1 % 2) + arg2 - PortSettings.field(arg0, "mapY")) + 26.0f);
+    self.mapAfter(arg0, arg3);
+}
+; A cell further out: NodeMap.jump (the view centred on it), then the owner's part.
+method "mapJump" args=4 locals=1 {
+    loc0 = Array.new(2);
+    loc0[0] = arg1;
+    loc0[1] = arg2;
+    Sound.playSE(31);
+    arg0.jump(loc0);
+    self.mapAfter(arg0, arg3);
+}
+; What the owner does after a move: NodeMapMain.selectNode (arg1 nil) the place and the tag into its locals 2 and 1,
+; FreePlay.selectNode (arg1) into its fields pos and ctg; the last focus kept.
+method "mapAfter" args=2 locals=1 {
+    loc0 = arg0.getPos();
+    if (arg1 == nil) {
+        PortMouse.setLocal(2, loc0);
+        PortMouse.setLocal(1, arg0.getTag());
+    } else {
+        PortSettings.setField(arg1, "pos", loc0);
+        PortSettings.setField(arg1, "ctg", arg0.getTag());
+    }
+    EventNode.setLastFocus(loc0);
+}
+; A strip (OmakeActorSelector, MahjongStageSelector, MahjongPlayerSelector arg0; the members' bar arg1): arg3 items
+; left (< 0) or right, the selector's own left / right (the list scrolls at its ends), one sound 32 as the owner's
+; loop plays; arg2 1 the stage strip, whose owner then shows the stage's members on the bar.
+method "strip" args=4 locals=0 {
+    Sound.playSE(32);
+    while (arg3 < 0) {
+        arg0.left();
+        arg3 = arg3 + 1;
+    }
+    while (arg3 > 0) {
+        arg0.right();
+        arg3 = arg3 - 1;
+    }
+    if (arg2 == 1) {
+        arg1.setAll(arg0.getMentsu());
+    }
+}
+; The members' bar (MahjongMentsu arg0): slot arg1 the target, as L2 / R2 do (sound 21, focusL / focusR end in focus).
+method "member" args=2 locals=0 {
+    Sound.playSE(21);
+    arg0.focus(arg1);
+}
+; Free play's talk (KaiwaSelector arg0): the cursor to column arg1, row arg2 (the native has written the loop's
+; copies), as KaiwaFree.scriptMain does for one pad move (sound 32, moveCursor).
+method "kaiwaCell" args=3 locals=0 {
+    Sound.playSE(32);
+    arg0.moveCursor(arg1, arg2);
+}
+; Free play's cleared heroines (ClearInfo arg0, its CommandMenu arg1, the list arg3): entry arg2, as its loop does for
+; up or down (sound 32, the menu's move, the index into local 6, the heroine's record).
+method "clearInfo" args=4 locals=1 {
+    Sound.playSE(32);
+    loc0 = arg1.moveCursor(arg2);
+    PortMouse.setLocal(6, loc0);
+    arg0.setInfo(arg3[loc0][1] % 9);
+}
+; The favour check (FavorCheck.scriptMain(kind): its heroines' panel arg0, CommandMenu arg1, the list arg3, the gauge
+; shown arg4 and the one closing arg5, its locals 0, 6, 3, 8 and 9): entry arg2, as its loop does for up or down
+; (sound 32, the index into local 7, the closing gauge gone, the shown one closing, the panel's focus and the
+; heroine's gauge if she has one); the gauges go back into locals 8 and 9.
+method "favorCheck" args=6 locals=4 {
+    Sound.playSE(32);
+    loc0 = arg1.moveCursor(arg2);
+    PortMouse.setLocal(8, loc0);
+    loc2 = arg4;
+    loc3 = arg5;
+    if (loc3 != nil) {
+        loc3.destruct();
+        loc3 = nil;
+    }
+    if (loc2 != nil) {
+        loc3 = loc2.close();
+        loc2 = nil;
+    }
+    if (loc0 == 0) {
+        arg0.focusAll();
+    } else {
+        loc1 = arg3[loc0][1] - 1;
+        arg0.focus(loc1);
+        if (Heroine.getObj(loc1).getGauge() > 0) {
+            loc2 = FavorGauge.new(Heroine.getObj(loc1), 1).show();
+        }
+    }
+    PortMouse.setLocal(9, loc2);
+    PortMouse.setLocal(10, loc3);
 }

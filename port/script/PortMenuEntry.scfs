@@ -13,13 +13,19 @@ const symbol "setPos"
 const symbol "move"
 const symbol "fadeLight"
 const symbol "destruct"
+const symbol "setField"
+const symbol "field"
+const float 0x3f59999a ; 0.85
 const float 0x00000000 ; 0.0
 ; The port's entry of the main menu: what CommandMenu asks of an entry's Sprite (setAlpha, setPos, move, fadeLight,
-; destruct), done on a stroke of the game's (variant 1004: the stroke of the unused "Options" entry, its lettering painted
-; out by the port, Graphics::blank_stroke) and a label in the game's font and the layer's language on top.
+; destruct), done on a stroke of the game's (texture 46 variant 1000: the Settings entry's own stroke, its lettering painted
+; out by the port, Graphics::blank_stroke, so the port's options share the game's Settings colour) and a label in the game's
+; font and the layer's language on top, at 85 % (letters and spacing) so that it keeps the stroke's margins.
 method "initialize" args=0 locals=0 {
-    self.back = Sprite.new(42, 1004, 10).setAlpha(0.0f);
-    self.label = TextLineC.new(11, 0.0f, 0.0f, PortSettings.pitch() - 1, 0, 1);
+    self.back = Sprite.new(46, 1000, 10).setAlpha(0.0f);
+    self.label = TextLineC.new(11, 0.0f, 0.0f, (PortSettings.pitch() - 1) * 85 / 100, 0, 1);
+    PortSettings.setField(self.label, "sclX", PortSettings.field(self.label, "sclX") * 0.85f);
+    PortSettings.setField(self.label, "sclY", PortSettings.field(self.label, "sclY") * 0.85f);
     self.label.setText(PortSettings.menuLabel());
     self.label.setAlpha(0.0f);
 }

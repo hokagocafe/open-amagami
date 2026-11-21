@@ -371,7 +371,7 @@ The mahjong table (`n0fre___18A`, a developers' node that opens it) now plays a 
 ## The text's dark edge and the breath puff (2026-10-17, reported by the owner against PCSX2)
 
 - **Text edge (confirmed by reading the code).** The glyphs of `font/K2_font28_24` are bare white masks with soft edges; the font's fourth palette is dark grey (63, 63, 63). `K2R_CObjSprFont`'s draw (`0x19AAF0`) draws a character of palette 0 to 2 a second time, 2.0 to the right and down, in palette 3 (a character of palette 3 gets the copy in palette 0); the copy lies under the glyph and gives the text its dark edge. The port did not draw it; it does now (`CharObject`).
-- **Breath puff.** `Breath`'s puffs (`StandExt`, `sysgraph/breath%1d`) go in front of the character they come from, by a depth of +0.001; the port has no depth sort among characters, and created after the character the puff was drawn behind it. It is now drawn on top of its layer (approximation: a character further in front in the same layer would be covered too).
+- **Breath puff.** `Breath`'s puffs (`StandExt`, `sysgraph/breath%1d`) go in front of the character they come from, by a depth of +0.001; since 2026-11-14 the port sorts it among the characters of its layer by that depth (d1-draw-order.md 4, "Applied"); before, it was drawn on top of its layer.
 
 ## History clock and event-graph minimap (2026-10-17)
 

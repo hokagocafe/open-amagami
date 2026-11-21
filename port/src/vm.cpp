@@ -402,6 +402,17 @@ void VM::patch_main_menu(ClassObj* cls) {
             break;
         }
     if (items < 0 || menu < 0 || at_choice == 0) return;
+    // scriptMain's two headers, `Sprite.new(40, 0, 8)` ("Option") and `Sprite.new(37, 0, 8)` ("Main menu"), each kept in
+    // a local: the port's screen swaps them as the game's Settings does. Not found: nil, the headers stay as they are.
+    auto header_local = [&](int picture) {
+        for (size_t i = 0; i + 4 < at_choice; ++i)
+            if (is_const(sm[i], 6, "Sprite") && sm[i + 1].op == 0x24 && sm[i + 1].a == picture && sm[i + 2].op == 0x24 &&
+                sm[i + 2].a == 0 && sm[i + 3].op == 0x24 && sm[i + 3].a == 8)
+                for (size_t j = i + 4; j < at_choice; ++j)
+                    if (sm[j].op == 0x23) return sm[j].a;
+        return -1;
+    };
+    const int option_header = header_local(40), main_header = header_local(37);
     auto add = [&](uint8_t tag, const char* text) {
         ClassSource::Constant c;
         c.tag = tag;
@@ -412,7 +423,10 @@ void VM::patch_main_menu(ClassObj* cls) {
     const int hooks = add(6, "PortHooks");
     const int main_items = add(7, "mainItems"), main_menu = add(7, "mainMenu"), main_select = add(7, "mainSelect");
     const int choice = sm[at_choice].a;
-    insert_code(sm, at_choice + 1, {{0x51, hooks, 0}, {0x22, choice, 0}, {0x20, menu, 0}, {0x32, 2, main_select}, {0x05, 0, 0}});
+    const Instr push_option = option_header >= 0 && main_header >= 0 ? Instr{0x22, option_header, 0} : Instr{0x25, 0, 0};
+    const Instr push_main = option_header >= 0 && main_header >= 0 ? Instr{0x22, main_header, 0} : Instr{0x25, 0, 0};
+    insert_code(sm, at_choice + 1, {{0x51, hooks, 0}, {0x22, choice, 0}, {0x20, menu, 0}, push_option, push_main,
+                                    {0x32, 4, main_select}, {0x05, 0, 0}});
     insert_code(mk, at_menu + 1, {{0x51, hooks, 0}, {0x20, menu, 0}, {0x32, 1, main_menu}, {0x05, 0, 0}});
     insert_code(mk, at_new, {{0x51, hooks, 0}, {0x20, menu_com, 0}, {0x22, items, 0}, {0x32, 2, main_items}, {0x23, items, 0}});
 }

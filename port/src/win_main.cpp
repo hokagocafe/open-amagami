@@ -13,6 +13,10 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <mmsystem.h>
+#ifdef AMG_PERSONAL
+#include <audiopolicy.h>
+#include <mmdeviceapi.h>
+#endif
 #include <shlobj.h>
 #include <shobjidl.h>
 
@@ -44,7 +48,13 @@
 #include "datapath.hpp"
 #include "game_import.hpp"
 #include "input.hpp"
+#include "dialog.hpp"
+#include "dialog_win32.hpp"
 #include "launcher.hpp"
+#include "launcher_amagami.hpp"
+#include "launcher_cli.hpp"
+#include "launcher_portable.hpp"
+#include "launcher_sdl.hpp"
 #include "menu_pointer.hpp"
 #include "mouse_menus.hpp"
 #include "cursor_art.hpp"
@@ -108,7 +118,7 @@ std::atomic<bool> mouse_cancelled{false};
 std::atomic<bool> mouse_right_click{false};  // an edge, taken by the machine once per frame
 std::atomic<int> mouse_wheel{0};              // wheel notches since the last frame, up positive
 std::atomic<int> menu_held{0};
-std::atomic<bool> menu_on_screen{false};      // the pointer sees a menu it plays: the cursor stays while the mouse rests
+std::atomic<bool> menu_on_screen{false};      // an adapter holds the screen: the cursor stays while the mouse rests
 // Mouse mode (docs/technical/mouse-native-design.md 2.5): set by a real move, a click or the wheel, ended by a key or a
 // pad button. While it is on, the arrow of a registered menu is not drawn (Scene::hide_uid).
 std::atomic<bool> mouse_mode{false};
@@ -122,7 +132,7 @@ bool g_cursor_shown = true;
 DWORD g_cursor_moved = 0;
 int g_cursor_last_x = -1, g_cursor_last_y = -1;
 constexpr UINT_PTR CURSOR_TIMER = 7;
-constexpr DWORD CURSOR_REST_MS = 3000;                // what the mouse presses in the menus this frame (menu_pointer.hpp)
+constexpr DWORD CURSOR_REST_MS = 3000;                // what the mouse presses in the menus this frame (mouse_menus.hpp, menu_pointer.hpp)
 HWND window = nullptr;
 std::atomic<ULONGLONG> g_game_began{0};  // GetTickCount64 when the game started to load: a crash soon after is most often a damaged copy
 std::atomic<VM*> g_vm{nullptr};  // the running machine, for the crash report
@@ -546,6 +556,52 @@ void take_sound(int16_t* out, size_t count) {
     }
 }
 
+#ifdef AMG_PERSONAL
+// WinMM gives the sound no name of its own, so the volume mixer showed the title of one of the process's windows (the personal text window
+// is called "Text", which exists only in the personal build, so this is too). This names the process's audio session "Amagami". The session appears a moment after the first buffers are played, so it
+// is looked for during a few seconds, on a thread of its own so the sound thread is not delayed.
+void name_audio_session() {
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    IMMDeviceEnumerator* enumerator = nullptr;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator)))) {
+        for (int attempt = 0; attempt < 30 && !quit; ++attempt) {
+            bool done = false;
+            IMMDevice* device = nullptr;
+            IAudioSessionManager2* manager = nullptr;
+            IAudioSessionEnumerator* sessions = nullptr;
+            if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device)) &&
+                SUCCEEDED(device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr, reinterpret_cast<void**>(&manager))) &&
+                SUCCEEDED(manager->GetSessionEnumerator(&sessions))) {
+                int count = 0;
+                sessions->GetCount(&count);
+                for (int i = 0; i < count; ++i) {
+                    IAudioSessionControl* control = nullptr;
+                    if (FAILED(sessions->GetSession(i, &control))) continue;
+                    IAudioSessionControl2* control2 = nullptr;
+                    if (SUCCEEDED(control->QueryInterface(IID_PPV_ARGS(&control2)))) {
+                        DWORD pid = 0;
+                        if (SUCCEEDED(control2->GetProcessId(&pid)) && pid == GetCurrentProcessId()) {
+                            control->SetDisplayName(L"Amagami", nullptr);
+                            done = true;
+                        }
+                        control2->Release();
+                    }
+                    control->Release();
+                }
+            }
+            if (sessions) sessions->Release();
+            if (manager) manager->Release();
+            if (device) device->Release();
+            if (done) break;
+            Sleep(250);
+        }
+        enumerator->Release();
+    }
+    if (SUCCEEDED(init)) CoUninitialize();
+}
+
+#endif  // AMG_PERSONAL
+
 void audio_thread(AudioEngine* engine) {
     (void)engine;
     opt_out_of_throttling(false);
@@ -561,6 +617,9 @@ void audio_thread(AudioEngine* engine) {
     HWAVEOUT out = nullptr;
     if (waveOutOpen(&out, WAVE_MAPPER, &fmt, reinterpret_cast<DWORD_PTR>(event), 0, CALLBACK_EVENT) != MMSYSERR_NOERROR)
         return;  // no sound device: play silently
+#ifdef AMG_PERSONAL
+    std::thread(name_audio_session).detach();
+#endif
     const int COUNT = 4, FRAMES = 1024;
     std::vector<std::vector<int16_t>> data(COUNT, std::vector<int16_t>(size_t(FRAMES) * 2));
     WAVEHDR hdr[COUNT] = {};
@@ -1120,7 +1179,6 @@ void machine_thread(std::string root) {
                     static int last_others = 0;
                     const int others = held.load() | pad_held.load();
                     if (others & ~last_others) {
-                        pointer.yield();
                         menus.yield();
                         mouse_mode = false;
                         if (pad_held.load() & ~last_others) PostMessageW(window, WM_AMG_HIDE_CURSOR, 0, 0);
@@ -1129,7 +1187,6 @@ void machine_thread(std::string root) {
                 }
                 if (mouse_cancelled.exchange(false) || view.width <= 0 || view.height <= 0) {
                     v.touch.cancel();
-                    pointer.yield();
                     menus.yield();
                     v.graphics->hide_uid = 0;
                     v.graphics->hide_image = nullptr;
@@ -1158,17 +1215,11 @@ void machine_thread(std::string root) {
                         pics.cursor = v.graphics->ui_image(20, 0);
                         if (pics.cursor && amg::cursor_art::set_source(pics.cursor->w, pics.cursor->h, pics.cursor->px.data()))
                             PostMessageW(window, WM_AMG_CURSOR_ART, 0, 0);  // the pointer becomes the game's arrow
-                        pics.tab = v.graphics->ui_image(47, 0);
-                        pics.note = v.graphics->ui_image(33, 0);
                         pics.back = v.graphics->ui_image(62, 2);
-                        pics.arrow = v.graphics->ui_image(7, 0);
-                        pics.map_cursor = v.graphics->ui_image(25, 0);
-                        for (int k = 0; k < 4; ++k) pics.map_arrow[k] = v.graphics->ui_image(28 + k, 0);
                         const bool right = mouse_right_click.exchange(false) && inside;
                         const int wheel = mouse_wheel.exchange(0);
                         int native_mask = 0;
                         if (menus.update(v, seen, mxu, myu, inside, down, click && inside, right, wheel, native_mask)) {
-                            pointer.yield();  // a registered menu (mouse_menus.hpp): one direct move, no bursts
                             menu_held = native_mask;
                             menu_on_screen = true;
                             v.graphics->hide_uid = mouse_mode.load() ? menus.arrow_uid : 0;
@@ -1177,8 +1228,10 @@ void machine_thread(std::string root) {
                         } else {
                             v.graphics->hide_uid = 0;
                             v.graphics->hide_image = nullptr;
+                            // No adapter holds the screen (dialogue, the title, the gallery's viewer): click confirm,
+                            // right click cancel, the "back" hint (menu_pointer.hpp).
                             menu_held = pointer.update(seen, pics, mxu, myu, inside, down, click && inside, right, wheel);
-                            menu_on_screen = pointer.probe.kind != '-';
+                            menu_on_screen = false;
                         }
                     }
                 }
@@ -1370,7 +1423,33 @@ void write_setting(const std::string& key, const std::string& value) {
 // The modern folder dialog (the one of Open file): an address bar to type or paste a path (a network or \\wsl.localhost
 // folder too), Quick access and search. Returns the folder in the system code page, as before, or "" if cancelled.
 // A message box with `text` (UTF-8) and Amagami as its title; the button pressed.
-int say(const std::string& text, UINT flags) { return MessageBoxW(nullptr, ui::wide(text).c_str(), L"Amagami", flags); }
+// The program's dialog service (docs/technical/launcher-component.md): Windows' message boxes, unless a script answers them
+// (AMG_LAUNCHER_UI=scripted, AMG_LAUNCHER_ANSWERS="ok,yes,no", AMG_LAUNCHER_UI_LOG=FILE: the launcher's outcome check).
+amg::dialog::Win32Service g_win32_dialogs;
+std::unique_ptr<amg::dialog::Service> g_other_dialogs;
+
+void choose_dialog_service() {
+    g_win32_dialogs.title = "Amagami";
+    const char* mode = std::getenv("AMG_LAUNCHER_UI");
+    if (mode && std::string(mode) == "scripted") {
+        const char* answers = std::getenv("AMG_LAUNCHER_ANSWERS");
+        const char* log = std::getenv("AMG_LAUNCHER_UI_LOG");
+        g_other_dialogs = amg::dialog::make_scripted(answers ? answers : "", log ? log : "");
+        amg::dialog::set(g_other_dialogs.get());
+    } else {
+        amg::dialog::set(&g_win32_dialogs);
+    }
+}
+
+// A box with a Windows message-box's flags (the code that asks was written with them), answered by the dialog service.
+int say(const std::string& text, UINT flags) {
+    using namespace amg::dialog;
+    const UINT kind = flags & 0xF, icon_bits = flags & 0xF0;
+    const Buttons buttons = kind == MB_YESNOCANCEL ? Buttons::YesNoCancel : kind == MB_YESNO ? Buttons::YesNo : Buttons::Ok;
+    const Icon icon = icon_bits == MB_ICONWARNING ? Icon::Warning : icon_bits == MB_ICONERROR ? Icon::Error : icon_bits == MB_ICONQUESTION ? Icon::Question : Icon::Info;
+    const Reply reply = show(text, buttons, icon, (flags & MB_DEFBUTTON2) != 0);
+    return reply == Reply::Yes ? IDYES : reply == Reply::No ? IDNO : reply == Reply::Cancel ? IDCANCEL : IDOK;
+}
 
 // Why `root` cannot be played ("" when it can): the checks of the folder, then whether its files are whole.
 std::string folder_problem(const std::string& root) {
@@ -1405,7 +1484,7 @@ std::string pick_folder(const std::string& title = ui::tr("Choose the folder of 
 // `repatch` folder, a Vita3K-style `app`/`patch` tree, or the three files loose); the folder below it that holds AMAGAMI.IMG,
 // SCENARIO.CPK and GRAPH.CPK is used. Its AMAGAMI.IMG should be the English one of port/data/known_versions.txt; another
 // one is taken only if the player agrees. Returns true when the layer was added (and chosen).
-bool add_english_patch(const std::string& root) {
+bool add_english_patch(const std::string& root, const std::string& source = "") {
     namespace fs = std::filesystem;
     std::error_code ec;
     if (root.empty()) {
@@ -1416,7 +1495,7 @@ bool add_english_patch(const std::string& root) {
         say(ui::tr("Your game folder already has the English translation built in: nothing to add."), MB_OK | MB_ICONINFORMATION);
         return false;
     }
-    const std::string picked = pick_folder(ui::tr("Choose the folder of the English fan patch (Amagami EbKore+ English v1.1)"));
+    const std::string picked = source.empty() ? pick_folder(ui::tr("Choose the folder of the English fan patch (Amagami EbKore+ English v1.1)")) : source;
     if (picked.empty()) return false;
     // The first folder (the picked one, then below it, a few levels deep) with the three files.
     fs::path img, scenario, graph;
@@ -1487,11 +1566,6 @@ std::string ask_for_copy(std::string candidate) {
     }
 }
 
-// Once the game is set up the first time, the desktop and Start menu shortcuts are offered (once; not in portable mode).
-void offer_shortcuts(const std::string& root) {
-    amg::shortcut::offer_once(root, read_setting("shortcut_offered") == "1", [] { write_setting("shortcut_offered", "1"); });
-}
-
 // Imports `source` into the program's folder after asking; returns the folder to run ("" if the player cancelled).
 std::string import_or_use(const std::string& source) {
     std::string dest = amg::import_destination();
@@ -1503,7 +1577,6 @@ std::string import_or_use(const std::string& source) {
     if (answer == IDCANCEL) return "";
     if (answer == IDNO) {
         write_setting("root", source);
-        offer_shortcuts(source);
         return source;
     }
     std::string failed = amg::import_game(source, dest);
@@ -1513,7 +1586,6 @@ std::string import_or_use(const std::string& source) {
     }
     write_setting("root", dest);
     write_setting("source", source);
-    offer_shortcuts(dest);
     return dest;
 }
 
@@ -1534,6 +1606,39 @@ std::string choose_root(const std::string& wanted, const std::string& import_fro
 
 // The port's settings (the rows of the game's Settings screen and the launcher's window) read and write config.ini and apply
 // at once.
+// What only this program can do for the launcher and for the commands: choose and import a copy, find copies, add the English patch.
+void fill_project_actions(amg::launcher::ProjectSpec& services) {
+    services.choose_folder = [] {
+        std::string source = ask_for_copy("");
+        return source.empty() ? std::string() : import_or_use(source);
+    };
+    services.add_variant = [](const std::string& r, const std::string& from) { return add_english_patch(r, from); };
+    services.find_copies = [] {
+        // Where a copy of the game is likely to be: a Vita3K install, the program's own game folder, the desktop,
+        // the documents and the downloads.
+        auto env = [](const char* name) {
+            const char* v = std::getenv(name);
+            return v ? std::string(v) : std::string();
+        };
+        std::vector<std::string> bases;
+        if (!env("APPDATA").empty()) bases.push_back(env("APPDATA") + "/Vita3K/Vita3K");
+        bases.push_back(amg::import_destination());
+        const std::string home = env("USERPROFILE");
+        if (!home.empty())
+            for (const char* sub : {"/Desktop", "/Downloads", "/Documents"}) bases.push_back(home + sub);
+        return amg::find_installed_copies(bases, read_setting("root"));
+    };
+    services.use_copy = [](const std::string& folder) {
+        const std::string source = amg::find_game_root(folder);
+        const std::string problem = folder_problem(source);
+        if (!problem.empty()) {
+            say(problem, MB_OK | MB_ICONWARNING);
+            return std::string();
+        }
+        return import_or_use(source);
+    };
+}
+
 void open_game_settings(HWND hwnd) {
     static bool open = false;  // the window pumps messages: a second F8 must not open a second one
     if (open) return;
@@ -1541,9 +1646,9 @@ void open_game_settings(HWND hwnd) {
     held = 0;
     mouse_down = 0;
     g_paused = true;
-    amg::launcher::Services services;
-    services.read_setting = [](const std::string& key) { return read_setting(key); };
-    services.write_setting = [](const std::string& key, const std::string& value) { write_setting(key, value); };
+    amg::launcher::ProjectSpec services;
+    amg::launcher::fill_amagami_spec(services, [](const std::string& key) { return read_setting(key); },
+                                     [](const std::string& key, const std::string& value) { write_setting(key, value); });
     amg::launcher::show_game_settings(hwnd, HINSTANCE(GetModuleHandleW(nullptr)), services);
     g_paused = false;
     open = false;
@@ -1641,8 +1746,43 @@ LONG WINAPI crash_filter(EXCEPTION_POINTERS* info) {
 
 void crash_terminate() { report_crash("The program ended on an unhandled error", 0xE0000001, reinterpret_cast<void*>(&crash_terminate)); }
 
+// The arguments after the program's name, as UTF-8.
+std::vector<std::string> command_line_arguments() {
+    int count = 0;
+    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &count);
+    std::vector<std::string> out;
+    for (int i = 1; i < count; ++i) out.push_back(amg::ui::narrow(argv[i]));
+    if (argv) LocalFree(argv);
+    return out;
+}
+
+// A command runs without a window, so its text goes to the terminal that started the program (output that is redirected to a pipe
+// or a file is left where it is), and the questions are answered on that terminal or by the flags.
+amg::dialog::Service* g_console_dialogs = nullptr;
+
+void prepare_terminal(const std::vector<std::string>& cli_args) {
+    auto has = [](DWORD id) {
+        HANDLE h = GetStdHandle(id);
+        return h && h != INVALID_HANDLE_VALUE;
+    };
+    if (!has(STD_OUTPUT_HANDLE) || !has(STD_ERROR_HANDLE)) {
+        if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+            FILE* f = nullptr;
+            if (!has(STD_OUTPUT_HANDLE)) freopen_s(&f, "CONOUT$", "w", stdout);
+            if (!has(STD_ERROR_HANDLE)) freopen_s(&f, "CONOUT$", "w", stderr);
+            if (!has(STD_INPUT_HANDLE)) freopen_s(&f, "CONIN$", "r", stdin);
+        }
+    }
+    SetConsoleOutputCP(CP_UTF8);
+    static std::unique_ptr<amg::dialog::Service> console;
+    console = amg::dialog::make_console(amg::launcher::cli_forced_answer(cli_args));
+    g_console_dialogs = console.get();
+    if (!std::getenv("AMG_LAUNCHER_UI")) amg::dialog::set(g_console_dialogs);  // a script chosen by the environment keeps answering
+}
+
 int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdline, int show) {
     SetUnhandledExceptionFilter(crash_filter);
+    choose_dialog_service();
     amg::updater::cleanup();  // the files an update moved aside
     std::set_terminate(crash_terminate);
     std::string root = ".";
@@ -1664,52 +1804,55 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdline, int show) {
     {
         install_settings_hooks();
         amg::ui::init(read_setting("ui_lang"));  // the words of the launcher and its messages
+        const std::vector<std::string> cli_args = command_line_arguments();
+        const bool by_command = !cli_args.empty() && (amg::launcher::is_cli_command(cli_args[0]) || amg::launcher::looks_like_command(cli_args[0]));
+        if (by_command) prepare_terminal(cli_args);
+        if (value_after("--root").empty() && value_after("--save-dir").empty()) {
+            const std::string blocked = amg::launcher::unwritable_data_folder();
+            if (!blocked.empty()) {
+                say(ui::fmt("The program cannot write in its own folder:\n{0}\n\nYour settings and saves would be lost. Move the program folder somewhere you can write to (for example Documents or the Desktop) and start it again.", {blocked}),
+                    MB_OK | MB_ICONWARNING);
+                return by_command ? 1 : 0;  // a command that cannot write has failed
+            }
+        }
+        // Asking for the help text touches nothing; every other command reads the settings, so it sees the migrated ones.
+        const bool only_help = by_command && (cli_args[0] == "help" || cli_args[0] == "--help" || cli_args[0] == "-h");
+        if (!only_help) amg::launcher::offer_legacy_migration([](const std::string& key, const std::string& value) { write_setting(key, value); });
+        std::string started_by_command;
+        if (by_command) {  // D-051: the command line is the first front end; the window is only one more
+            amg::launcher::ProjectSpec cli_spec;
+            amg::launcher::fill_amagami_spec(cli_spec, [](const std::string& key) { return read_setting(key); },
+                                             [](const std::string& key, const std::string& value) { write_setting(key, value); });
+            fill_project_actions(cli_spec);
+            const amg::launcher::CliResult result = amg::launcher::run_cli(cli_spec, cli_args);
+            if (!result.start_game) return result.exit_code;
+            started_by_command = result.root;
+        }
         // The launcher (D-027) opens unless a developer flag names the folder, or the player set `launcher=skip` (holding Shift
         // shows it anyway) and the remembered folder still passes the check.
         const bool developer = !value_after("--root").empty() || !value_after("--import").empty() ||
                                args.find("--reimport") != std::string::npos || args.find("--start") != std::string::npos;
         std::string remembered = read_setting("root");
         if (remembered.empty() && amg::check_game_folder(".").empty()) remembered = ".";  // the development layout
-        if (!developer) amg::shortcut::refresh(remembered);  // shortcuts left pointing at an older version's folder
         const bool skip = developer || (read_setting("launcher") == "skip" && !(GetAsyncKeyState(VK_SHIFT) & 0x8000) &&
                                         !remembered.empty() && folder_problem(remembered).empty());
         std::string chosen;
-        if (skip) {
+        if (!started_by_command.empty()) {
+            chosen = started_by_command;
+        } else if (skip) {
             chosen = choose_root(value_after("--root"), value_after("--import"), args.find("--reimport") != std::string::npos);
         } else {
-            amg::launcher::Services services;
-            services.read_setting = [](const std::string& key) { return read_setting(key); };
-            services.write_setting = [](const std::string& key, const std::string& value) { write_setting(key, value); };
-            services.choose_folder = [] {
-                std::string source = ask_for_copy("");
-                return source.empty() ? std::string() : import_or_use(source);
-            };
-            services.add_english = [](const std::string& r) { return add_english_patch(r); };
-            services.find_copies = [] {
-                // Where a copy of the game is likely to be: a Vita3K install, the program's own game folder, the desktop,
-                // the documents and the downloads.
-                auto env = [](const char* name) {
-                    const char* v = std::getenv(name);
-                    return v ? std::string(v) : std::string();
-                };
-                std::vector<std::string> bases;
-                if (!env("APPDATA").empty()) bases.push_back(env("APPDATA") + "/Vita3K/Vita3K");
-                bases.push_back(amg::import_destination());
-                const std::string home = env("USERPROFILE");
-                if (!home.empty())
-                    for (const char* sub : {"/Desktop", "/Downloads", "/Documents"}) bases.push_back(home + sub);
-                return amg::find_installed_copies(bases, read_setting("root"));
-            };
-            services.use_copy = [](const std::string& folder) {
-                const std::string source = amg::find_game_root(folder);
-                const std::string problem = folder_problem(source);
-                if (!problem.empty()) {
-                    say(problem, MB_OK | MB_ICONWARNING);
-                    return std::string();
-                }
-                return import_or_use(source);
-            };
-            chosen = amg::launcher::run(inst, remembered, services);
+            amg::launcher::ProjectSpec services;
+            amg::launcher::fill_amagami_spec(services, [](const std::string& key) { return read_setting(key); },
+                                             [](const std::string& key, const std::string& value) { write_setting(key, value); });
+            fill_project_actions(services);
+            // The SDL3 window is the launcher (D-049); `launcher_ui=win32` (or AMG_LAUNCHER_UI_BACKEND=win32) picks the Win32 one, which is
+            // also what runs if the SDL window cannot be made.
+            const char* backend_env = std::getenv("AMG_LAUNCHER_UI_BACKEND");
+            const std::string backend = backend_env ? backend_env : read_setting("launcher_ui");
+            bool started = false;
+            if (backend != "win32") chosen = amg::launcher::run_sdl(services, remembered, &started);
+            if (backend == "win32" || !started) chosen = amg::launcher::run(inst, remembered, services);
         }
         if (chosen.empty()) return 0;
         root = chosen;
@@ -1793,6 +1936,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmdline, int show) {
         if (HICON big = amg::shortcut::load_game_icon(root, GetSystemMetrics(SM_CXICON))) SendMessageW(window, WM_SETICON, ICON_BIG, LPARAM(big));
         if (HICON little = amg::shortcut::load_game_icon(root, GetSystemMetrics(SM_CXSMICON)))
             SendMessageW(window, WM_SETICON, ICON_SMALL, LPARAM(little));
+        // The .exe's own icon cannot follow the game, so a shortcut with the game's icon sits next to it (made again at each start).
+        if (value_after("--root").empty()) amg::shortcut::refresh_next_to_program("Amagami", root);
     }
     {
         RECT client;

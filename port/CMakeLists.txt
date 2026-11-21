@@ -38,7 +38,7 @@ set_target_properties(amagami_vm_cli PROPERTIES OUTPUT_NAME amagami_vm)
 
 if(WIN32)
   # The playable front end: a Win32 window, no other dependency.
-  add_executable(amagami WIN32 src/win_main.cpp src/d3d_present.cpp src/game_import.cpp src/input.cpp src/data_check.cpp src/launcher.cpp src/launcher_dialogs.cpp src/updater.cpp src/shortcut.cpp src/update_check.cpp)
+  add_executable(amagami WIN32 src/win_main.cpp src/d3d_present.cpp src/game_import.cpp src/input.cpp src/data_check.cpp src/launcher.cpp src/launcher_dialogs.cpp src/launcher_amagami.cpp src/launcher_core.cpp src/dialog.cpp src/dialog_win32.cpp src/launcher_actions.cpp src/launcher_cli.cpp src/launcher_portable.cpp src/launcher_sdl.cpp src/third_party/imgui/imgui.cpp src/third_party/imgui/imgui_draw.cpp src/third_party/imgui/imgui_tables.cpp src/third_party/imgui/imgui_widgets.cpp src/third_party/imgui/backends/imgui_impl_sdl3.cpp src/third_party/imgui/backends/imgui_impl_sdlrenderer3.cpp src/updater.cpp src/shortcut.cpp src/update_check.cpp)
   # The release this build is ("v0.1.3", given by the release workflow); anything else is a development build, which never
   # asks for updates.
   set(AMG_VERSION "dev" CACHE STRING "The release tag this build is")
@@ -78,6 +78,7 @@ if(WIN32)
     set(AMG_SDL "${CMAKE_BINARY_DIR}/sdl3-download/SDL3-3.4.18")
   endif()
   target_include_directories(amagami PRIVATE "${AMG_SDL}/include")
+  target_include_directories(amagami PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/third_party/imgui")  # Dear ImGui for the launcher's SDL3 backend (D-049)
   target_link_libraries(amagami PRIVATE "${AMG_SDL}/lib/${AMG_ARCH}/SDL3.lib")
   add_custom_command(TARGET amagami POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${AMG_SDL}/lib/${AMG_ARCH}/SDL3.dll" "$<TARGET_FILE_DIR:amagami>"

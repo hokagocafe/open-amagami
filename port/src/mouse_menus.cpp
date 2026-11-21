@@ -10,9 +10,9 @@ namespace amg {
 
 namespace {
 
-constexpr int CONFIRM = 32, CANCEL = 64;
-// Half the width of a Load/Save slot's box from ScrollList.baseX, in script units (measured on the picture).
-constexpr double SHIORI_HALF_W = 150;
+constexpr int CONFIRM = 32, CANCEL = 64, DOWN = 16384;
+// Half the width of a Load/Save slot's box from ScrollList.baseX, in script units (measured on the picture of mouse_save_load: the boxes span x -209 to -84).
+constexpr double SHIORI_HALF_W = 64;
 
 // The owners' pad loops the port knows (Vita image; class that defines the method, method). Each moves its CommandMenu
 // with moveCursorU/D, keeps a copy of the index (the value those return) and plays sound 32 on a move.
@@ -150,7 +150,7 @@ const DrawItem* item_of(const Scene& seen, int64_t uid) {
 }
 
 // The layout of a screen in its own script units, placed where the picture shows it: the interface shrink
-// (Scene::ui_*) when the screen's pictures are shrunk (as MenuPointer::X/Y/D).
+// (Scene::ui_*) when the screen's pictures are shrunk (UiPlace, interface-scale.md).
 struct Layout {
     double u = 1, ax = 0, ay = 0;
     double X(double x) const { return ax + (x - ax) * u; }
@@ -182,10 +182,10 @@ const Frame* innermost(VM& vm, const char* cls, const char* method, Thread** t) 
 
 // The frame of `cls.method` when it is among the four innermost script frames of a live thread (under its own waits: (a loop that
 // waits through a script method of its own, as Selector.waitSelect does through Selector.mySleep), else null.
-const Frame* near_top(VM& vm, const char* cls, const char* method, Thread** t) {
+const Frame* near_top(VM& vm, const char* cls, const char* method, Thread** t, size_t depth = 4) {
     for (Thread* th : vm.live_threads) {
         if (th->done || th->frames.empty()) continue;
-        for (size_t k = 1; k <= 4 && k <= th->frames.size(); ++k) {
+        for (size_t k = 1; k <= depth && k <= th->frames.size(); ++k) {
             const Frame& fr = th->frames[th->frames.size() - k];
             if (!fr.method || !fr.method->cls || fr.method->cls->name != cls || fr.method->name != method) continue;
             if (fr.base >= th->stack.size()) continue;
@@ -242,6 +242,17 @@ void mouse_menus_mirror(VM& vm, const Value& index) {
     }
 }
 
+void mouse_menus_set_local(VM& vm, const Value& slot, const Value& v) {
+    Thread* t = pending.thread;
+    bool alive = false;
+    for (Thread* l : vm.live_threads)
+        if (l == t && !l->done) alive = true;
+    if (!alive || slot.tag != Tag::Int || t->frames.size() <= pending.frame || t->frames[pending.frame].method != pending.method)
+        return;
+    const size_t at = t->frames[pending.frame].base + 1 + size_t(slot.i);
+    if (at < t->stack.size()) t->stack[at] = v;
+}
+
 void MouseMenus::yield() {
     confirm_for_ = -1;
     last_x_ = last_y_ = 1e9;  // hover waits for a real move: the next update records the place, the one after compares
@@ -275,10 +286,35 @@ bool MouseMenus::update(VM& vm, const Scene& seen, double mx, double my, bool in
             screen = 'w';  // a question waiting for confirm or cancel (ControlPad.waitOX): no index
         } else if ((fr = near_top(vm, "Selector", "waitSelect", &t))) {
             screen = 'q';  // a choice (TextWindow's answers, and any other Selector grid)
+        } else if ((fr = near_top(vm, "TextWindow", "select", &t, 5)) && field(t->stack[fr->base], "selector") &&
+                   field(t->stack[fr->base], "selector")->tag == Tag::Nil) {
+            screen = 'p';  // a choice asked, its answers not shown yet: TextWindow.select waits for a direction
         } else if ((fr = near_top(vm, "KaiwaMain", "wadaiSelect", &t))) {
             screen = 'k';  // the conversation's topics (WadaiPanel)
         } else if ((fr = near_top(vm, "LoadMenu", "selectShiori", &t)) || (fr = near_top(vm, "SaveMenu", "selectShiori", &t))) {
             screen = 'l';  // the Load and Save lists (ShioriList)
+        } else if ((fr = near_top(vm, "AlbumMain", "selectPicture", &t))) {
+            screen = 'A';  // the album's pictures of one heroine
+        } else if ((fr = near_top(vm, "AlbumMain", "scriptMain", &t))) {
+            screen = 'a';  // the album's list of heroines
+        } else if ((fr = near_top(vm, "HistoryMain", "scriptMain", &t))) {
+            screen = 'h';  // the history (the day map's calendar of past events)
+        } else if ((fr = near_top(vm, "ClearInfo", "scriptMain", &t))) {
+            screen = 'i';  // free play's list of cleared heroines (a CommandMenu in a local; cancel only)
+        } else if ((fr = near_top(vm, "FavorCheck", "scriptMain", &t))) {
+            screen = 'I';  // the favour check (a CommandMenu in a local; cancel only)
+        } else if ((fr = near_top(vm, "KaiwaFree", "scriptMain", &t))) {
+            screen = 'K';  // free play's talk: the KaiwaSelector grid
+        } else if ((fr = near_top(vm, "FreePlay", "selectNode", &t))) {
+            screen = 'f';  // free play's map (the day map's NodeMap, the owner's pos and ctg in its fields)
+        } else if ((fr = near_top(vm, "OmakeMain", "selectActor", &t))) {
+            screen = 'o';  // the extras' actor strip (OmakeActorSelector over OmakeActorList)
+        } else if ((fr = near_top(vm, "Mahjong", "selectStage", &t)) || (fr = near_top(vm, "Mahjong", "selectPlayer", &t))) {
+            screen = 'j';  // the mahjong's stage and player strips (MahjongStageSelector, MahjongPlayerSelector)
+        } else if ((fr = near_top(vm, "NodeMapMain", "selectNode", &t))) {
+            screen = 'd';  // the day map (NodeMap, K2X_Script's class variable 6)
+        } else if ((fr = near_top(vm, "Mahjong", "titleMenu", &t))) {
+            screen = 't';  // the mahjong's title menu (TitleMenu)
         } else if ((fr = near_top(vm, "Gallery", "scriptMain", &t))) {
             screen = 'y';  // the gallery's grid of thumbnails and its tabs
         } else {
@@ -323,6 +359,19 @@ bool MouseMenus::update(VM& vm, const Scene& seen, double mx, double my, bool in
         }
         return true;
     }
+    if (screen == 'p') {  // the answers come up on a direction press (down: the first answer selected)
+        probe.kind = 'p';
+        const bool moved = last_x_ < 1e8 && std::hypot(mx - last_x_, my - last_y_) > 1.0;
+        last_x_ = mx;
+        last_y_ = my;
+        if (free_frames_ > 0) {
+            --free_frames_;
+        } else if (inside && (moved || click || wheel_steps != 0)) {
+            mask = DOWN;
+            free_frames_ = 1;
+        }
+        return true;
+    }
     if (screen == 'q') return choice_update(vm, seen, t->stack[fr->base], mx, my, inside, click, right_click, wheel_steps, mask);
     if (screen == 'k' && fr->base + 2 < t->stack.size())
         return topic_update(vm, seen, t->stack[fr->base + 1], t->stack[fr->base + 2], mx, my, inside, click, right_click,
@@ -333,6 +382,29 @@ bool MouseMenus::update(VM& vm, const Scene& seen, double mx, double my, bool in
         return shiori_update(vm, seen, t->stack[fr->base], t->stack[at + 2], t->stack[at + 3], mx, my, inside, click,
                              right_click, wheel_steps, mask);
     }
+    if (screen == 'a' || screen == 'A')
+        return album_update(vm, seen, t, fr, screen == 'A', mx, my, inside, click, right_click, wheel_steps, mask);
+    if (screen == 'h' && fr->base + 2 < t->stack.size())  // HistoryMain's loc0 (the HistoryView) and loc1 (the title)
+        return history_update(vm, seen, t->stack[fr->base + 1], t->stack[fr->base + 2], mx, my, inside, click, right_click,
+                              wheel_steps, mask);
+    if (screen == 'd') return map_update(vm, seen, t, fr, Value(), mx, my, inside, click, right_click, wheel_steps, mask);
+    if (screen == 'f') {
+        const bool r = map_update(vm, seen, t, fr, t->stack[fr->base], mx, my, inside, click, right_click, wheel_steps, mask);
+        probe.kind = 'f';
+        return r;
+    }
+    if (screen == 'i' || screen == 'I')
+        return info_update(vm, seen, t, fr, screen == 'I', mx, my, inside, click, right_click, wheel_steps, mask);
+    if (screen == 'K') return kaiwa_update(vm, seen, t, fr, mx, my, inside, click, right_click, wheel_steps, mask);
+    if (screen == 'o' && fr->base + 3 < t->stack.size())  // OmakeMain.selectActor: loc1 the members' bar, loc2 the selector
+        return strip_update(vm, seen, t->stack[fr->base + 3], t->stack[fr->base + 2], 0, mx, my, inside, click, right_click,
+                            wheel_steps, mask);
+    if (screen == 'j' && fr->base + 4 < t->stack.size())  // Mahjong.selectStage/selectPlayer: loc2 the bar, loc3 the selector
+        return strip_update(vm, seen, t->stack[fr->base + 4], t->stack[fr->base + 3], fr->method->name == "selectStage" ? 1 : 0,
+                            mx, my, inside, click, right_click, wheel_steps, mask);
+    if (screen == 't' && fr->base + 7 < t->stack.size())  // Mahjong.titleMenu's loc6 (the TitleMenu)
+        return title_update(vm, seen, t->stack[fr->base], t->stack[fr->base + 7], mx, my, inside, click, right_click,
+                            wheel_steps, mask);
     if (screen == 'y') {
         const size_t cursor_at = fr->base + 1 + 7;  // the grid's cursor sprite: local 7 of Gallery.scriptMain
         if (cursor_at >= t->stack.size()) return false;
@@ -1047,7 +1119,8 @@ bool MouseMenus::shiori_update(VM& vm, const Scene& seen, const Value& owner, co
             probe.tgt_y = y;
         }
     }
-    if (state == 1 || state == 3 || state_next == 1 || state_next == 3) return true;  // opening or closing
+    // ScrollList.run: state 1 is the list shown (it stays 1 after the opening), 3 closing; a pending 1 is the opening.
+    if (state == 3 || state_next == 1 || state_next == 3) return true;
     const Value vlist = *list, vfavor = favor, vtime = time;
     if (wheel_steps != 0 && free_frames_ == 0) {
         last_x_ = mx;
@@ -1114,6 +1187,446 @@ bool MouseMenus::gallery_update(VM& vm, const Scene& seen, const Value& gallery,
         set("nextX", i / 4);
         set("nextY", i % 4);
         return true;
+    }, mask);
+}
+
+// The album (AlbumMain). Its list of heroines (scriptMain): a CommandMenu in its local 6, the index copied into local 5
+// (the store after moveCursorD, written by PortMouse.mirror), the page of heroine loc3[i] opened after a move
+// (PortMouse.album). Its pictures (selectPicture(heroine)): 5 columns, cell (c, r) at -70 + 64 c, -74 + 46 r, the index
+// in the loop's locals 2 and 3 (curX, curY), the arrow (a Sprite of picture 20) in local 6 and its blink in locals 7
+// and 8; only the cells below the page's count (loc0.length()). The arrow is the only mark of the picture: in mouse
+// mode the port draws a box round the picture instead.
+bool MouseMenus::album_update(VM& vm, const Scene& seen, Thread* t, const Frame* fr, bool pictures, double mx, double my,
+                              bool inside, bool click, bool right_click, int wheel_steps, int& mask) {
+    const size_t at = fr->base + 1;  // the frame's slots: the arguments, then the locals
+    if (!pictures) {
+        probe.kind = 'a';
+        if (at + 6 >= t->stack.size()) return false;
+        const Value owner = t->stack[fr->base], menu = t->stack[at + 6], heroines = t->stack[at + 3];
+        if (!kind_of(vm, menu, "CommandMenu")) return false;
+        arrow_uid = uid_of(field(menu, "cursor"));
+        const int n = int(int_field(menu, "nofCom", 0)), next = int(int_field(menu, "nextCurY"));
+        const int hover = inside ? command_entry_at(menu, seen, mx, my) : -1;
+        if (hover >= 0) {
+            const Value* icons = field(menu, "icon");
+            const std::vector<Value> ic = icons ? elems(*icons) : std::vector<Value>();
+            if (const DrawItem* d = size_t(hover) < ic.size() ? item_of(seen, uid_of(&ic[size_t(hover)])) : nullptr) {
+                probe.has_tgt = true;
+                probe.tgt_x = d->centre[0];
+                probe.tgt_y = d->centre[1];
+            }
+        }
+        if (!command_active(menu)) return true;
+        Thread* th = t;
+        const size_t frame = size_t(fr - t->frames.data());
+        const Method* m = fr->method;
+        return drive(hover, next, n, mx, my, click, right_click, wheel_steps, [&](int i) {
+            pending = {th, frame, m};
+            return run_port(vm, "album", {owner, menu, Value::integer(i), heroines});
+        }, mask);
+    }
+    probe.kind = 'A';
+    if (at + 9 >= t->stack.size()) return false;
+    const Value list = t->stack[at + 1];
+    const Value arrow = t->stack[at + 7];
+    const int n = int(elems(list).size());
+    const DrawItem* a = item_of(seen, uid_of(&arrow));
+    if (!a || n <= 0) return true;
+    arrow_uid = uid_of(&arrow);
+    const Layout L = layout_of(seen, a);
+    const int64_t cx = t->stack[at + 3].tag == Tag::Int ? t->stack[at + 3].i : 0;
+    const int64_t cy = t->stack[at + 4].tag == Tag::Int ? t->stack[at + 4].i : 0;
+    const int cur = int(cx + cy * 5);
+    int hover = -1;
+    for (int i = 0; i < n; ++i) {
+        const double x = L.X(-70 + 64.0 * (i % 5)), y = L.Y(-74 + 46.0 * (i / 5));
+        if (i == cur) {
+            probe.has_sel = true;
+            probe.sel_x = x;
+            probe.sel_y = y;
+        }
+        if (inside && std::fabs(mx - x) <= L.D(32) && std::fabs(my - y) <= L.D(23)) {
+            hover = i;
+            probe.has_tgt = true;
+            probe.tgt_x = x;
+            probe.tgt_y = y;
+        }
+    }
+    // The box round the selected picture (the thumbnails fill most of their 64 by 46 cells).
+    mark.x0 = -70 + 64.0 * double(cx) - 31;
+    mark.x1 = mark.x0 + 62;
+    mark.h = 44;
+    mark.y = -74 + 46.0 * double(cy);
+    mark.at_y = true;
+    mark.frame = 2;
+    mark.light[0] = 1;
+    mark.light[1] = 0.5;
+    mark.light[2] = 0.2;
+    mark.alpha = 1;
+    Thread* th = t;
+    return drive(hover, cur, n, mx, my, click, right_click, wheel_steps, [&](int i) {
+        if (at + 9 >= th->stack.size()) return false;
+        th->stack[at + 3] = Value::integer(i % 5);
+        th->stack[at + 4] = Value::integer(i / 5);
+        th->stack[at + 8] = Value::boolean(false);  // the blink starts over, as after a pad move
+        th->stack[at + 9] = Value::integer(0);
+        return run_port(vm, "albumCell", {arrow, Value::integer(i % 5), Value::integer(i / 5)});
+    }, mask);
+}
+
+// The history (HistoryMain.scriptMain over a HistoryView): the 7 days of the page shown (HistoryDay ahd[page * 7 + c] at
+// its posX) by 4 times of day (y -14 + 33 r; the week's last column has only its first), the index in posX/posY, the
+// cursor a NodeMapCursor (four corners: no arrow). The page arrows (arrowL, arrowR) are L1 and R1.
+bool MouseMenus::history_update(VM& vm, const Scene& seen, const Value& view, const Value& title, double mx, double my,
+                                bool inside, bool click, bool right_click, int wheel_steps, int& mask) {
+    probe.kind = 'h';
+    if (!kind_of(vm, view, "HistoryView")) return false;
+    const Value* days = field(view, "ahd");
+    if (!days) return true;
+    const std::vector<Value> ahd = elems(*days);
+    const int64_t page = int_field(view, "page", 0), px = int_field(view, "posX", 0), py = int_field(view, "posY", 0);
+    const DrawItem* ref = item_of(seen, uid_of(field(view, "time0")));
+    if (!ref || ref->alpha <= 0.5 || int_field(view, "state", 0) != 1) return true;  // opening, closing (HistoryView.run: state 1 while shown)
+    const Layout L = layout_of(seen, ref);
+    // The cells in a fixed order (column by column), so the wheel walks them.
+    std::vector<std::pair<int, int>> cells;
+    for (int c = 0; c < 7; ++c)
+        for (int r = 0; r < (c == 6 ? 1 : 4); ++r) cells.push_back({c, r});
+    int hover = -1, cur = -1;
+    for (size_t i = 0; i < cells.size(); ++i) {
+        const int c = cells[i].first, r = cells[i].second;
+        const size_t k = size_t(page * 7 + c);
+        if (k >= ahd.size()) continue;
+        const double x = L.X(num_field(ahd[k], "posX")), y = L.Y(-14 + 33.0 * r);
+        if (c == px && r == py) {
+            cur = int(i);
+            probe.has_sel = true;
+            probe.sel_x = x;
+            probe.sel_y = y;
+        }
+        if (inside && std::fabs(mx - x) <= L.D(31) && std::fabs(my - y) <= L.D(16.5)) {
+            hover = int(i);
+            probe.has_tgt = true;
+            probe.tgt_x = x;
+            probe.tgt_y = y;
+        }
+    }
+    if (click && free_frames_ == 0) {  // the page arrows: L1 / R1 for one frame
+        const DrawItem* l = item_of(seen, uid_of(field(view, "arrowL")));
+        const DrawItem* r = item_of(seen, uid_of(field(view, "arrowR")));
+        const bool on_l = l && l->alpha > 0.5 && hit(l, mx, my, L.D(6)), on_r = r && r->alpha > 0.5 && hit(r, mx, my, L.D(6));
+        if (on_l || on_r) {
+            mask = on_l ? 4 : 8;
+            free_frames_ = 1;
+            last_x_ = mx;
+            last_y_ = my;
+            return true;
+        }
+    }
+    const Value vview = view, vtitle = title;
+    return drive(hover, cur, int(cells.size()), mx, my, click, right_click, wheel_steps, [&](int i) {
+        return run_port(vm, "history",
+                        {vview, vtitle, Value::integer(cells[size_t(i)].first), Value::integer(cells[size_t(i)].second)});
+    }, mask);
+}
+
+// The mahjong's title menu (Mahjong.titleMenu over a TitleMenu): entries TitleMenu.items[i] (a description, x, y), lit
+// by its cursor (picture 202 scaled to the entry, no arrow); the index is curPos (nextPos the target), the owner's copy
+// in its `cursor`. Active while the menu is still (state 0) or moving (3).
+bool MouseMenus::title_update(VM& vm, const Scene& seen, const Value& owner, const Value& menu, double mx, double my,
+                              bool inside, bool click, bool right_click, int wheel_steps, int& mask) {
+    probe.kind = 't';
+    if (!kind_of(vm, menu, "TitleMenu")) return false;
+    const Value* items_v = field(menu, "items");
+    if (!items_v) return true;
+    const std::vector<Value> items = elems(*items_v);
+    const int n = int(items.size()), next = int(int_field(menu, "nextPos", 0));
+    const int64_t st = int_field(menu, "state", 0), sn = int_field(menu, "stateNext", 0);
+    const DrawItem* cursor = item_of(seen, uid_of(field(menu, "cursor")));
+    const Layout L = layout_of(seen, cursor);
+    const auto num = [](const Value& v) { return v.tag == Tag::Int ? double(v.i) : v.tag == Tag::Float ? v.f : 0.0; };
+    int hover = -1;
+    for (int i = 0; i < n; ++i) {
+        // items[i]: [description, scale x, scale y, layer] in the source table; TitleMenu.run reads [0] the
+        // description (its [1], [2] scale picture 202), [1] and [2] the place, as makeMenu fills them.
+        const std::vector<Value> it = elems(items[size_t(i)]);
+        if (it.size() < 3) continue;
+        const std::vector<Value> desc = elems(it[0]);
+        const double x = L.X(num(it[1])), y = L.Y(num(it[2]));
+        double hw = L.D(60), hh = L.D(10);
+        if (cursor && desc.size() >= 3) {
+            const double k = cursor->image ? VIEW_SCALE / VIEW_UNIT : 1.0;
+            hw = cursor->rect[2] * num(desc[1]) * k * L.u / 2;
+            hh = cursor->rect[3] * num(desc[2]) * k * L.u / 2;
+        }
+        if (i == next) {
+            probe.has_sel = true;
+            probe.sel_x = x;
+            probe.sel_y = y;
+        }
+        if (inside && std::fabs(mx - x) <= hw && std::fabs(my - y) <= hh) {
+            hover = i;
+            probe.has_tgt = true;
+            probe.tgt_x = x;
+            probe.tgt_y = y;
+        }
+    }
+    if (!(st == 0 || st == 3) || !(sn == 0 || sn == 3)) return true;  // opening, closing or chosen
+    const Value vowner = owner, vmenu = menu;
+    return drive(hover, next, n, mx, my, click, right_click, wheel_steps, [&](int i) {
+        return run_port(vm, "titleMenu", {vowner, vmenu, Value::integer(i)});
+    }, mask);
+}
+
+// The day map (NodeMapMain.selectNode over the NodeMap in K2X_Script's class variable 6): a staggered grid of cells,
+// cell (X, Y) drawn at 24 (X - mapX) - 64, 28 (0.5 (1 - X % 2) + Y - mapY) + 26 (where NodeMap.move puts its cursor,
+// mcur), the map scrolling when the cursor goes past 3 columns or 1 row from the middle (mapX, mapY). Hover moves the
+// cursor only inside that still window (PortMouse.mapCell: NodeMap.move's own steps without the scroll, so the map never
+// slides under a still mouse); a click on a cell further out jumps there (NodeMap.jump, which centres it) and confirms,
+// as a click on a near cell does. The owner keeps the place and the tag in its locals 2 and 1 (written by
+// PortMouse.setLocal); free play's owner (FreePlay.selectNode, `free_owner` not nil) in its fields pos and ctg. The
+// wheel is up / down; right click is cancel (the pass-time question, as the pad's; free play's exit question).
+bool MouseMenus::map_update(VM& vm, const Scene& seen, Thread* t, const Frame* fr, const Value& free_owner, double mx,
+                            double my, bool inside, bool click, bool right_click, int wheel_steps, int& mask) {
+    probe.kind = 'd';
+    ClassObj* k2x = vm.find_class("K2X_Script");
+    if (!k2x || k2x->iv.size() <= 6) return false;
+    const Value map = k2x->iv[6];
+    if (!kind_of(vm, map, "NodeMap")) return false;
+    const Value* mcur = field(map, "mcur");
+    const DrawItem* corner = mcur ? item_of(seen, uid_of(field(*mcur, "cur0"))) : nullptr;
+    const Value* act = field(map, "actFlag");
+    if (!corner || !act || !act->truthy()) return true;  // standing by (a question, the menu) or not shown
+    const Layout L = layout_of(seen, corner);
+    const int64_t px = int_field(map, "posX"), py = int_field(map, "posY");
+    const int64_t ox = int_field(map, "mapX"), oy = int_field(map, "mapY");
+    auto at = [&](int64_t X, int64_t Y, double& x, double& y) {
+        x = L.X(24.0 * double(X - ox) - 64);
+        y = L.Y(28.0 * (0.5 * double(1 - X % 2) + double(Y - oy)) + 26);
+    };
+    double sx, sy;
+    at(px, py, sx, sy);
+    probe.has_sel = true;
+    probe.sel_x = sx;
+    probe.sel_y = sy;
+    // The cell under the mouse: the column, then the row of that column (half a row lower on even columns).
+    int64_t hx = -1, hy = -1;
+    if (inside) {
+        const int64_t X = ox + int64_t(std::lround(((mx - L.X(0)) / L.u + 64) / 24.0));
+        const double ry = ((my - L.Y(0)) / L.u - 26) / 28.0 - 0.5 * double(1 - ((X % 2) + 2) % 2);
+        const int64_t Y = oy + int64_t(std::lround(ry));
+        if (X >= 1 && X <= 63 && Y >= 2 && Y <= 64 && std::llabs(X - ox) <= 4 && std::llabs(Y - oy) <= 2) {
+            hx = X;
+            hy = Y;
+            double x, y;
+            at(X, Y, x, y);
+            probe.has_tgt = true;
+            probe.tgt_x = x;
+            probe.tgt_y = y;
+        }
+    }
+    if (wheel_steps != 0 && free_frames_ == 0) {  // a row a notch: the pad's up / down
+        mask = wheel_steps > 0 ? 4096 : DOWN;
+        free_frames_ = 1;
+        last_x_ = mx;
+        last_y_ = my;
+        confirm_for_ = -1;
+        return true;
+    }
+    const auto still = [&](int64_t X, int64_t Y) { return std::llabs(X - ox) <= 3 && std::llabs(Y - oy) <= 1; };
+    const int hover = hx >= 0 ? int(hx * 100 + hy) : -1;
+    const int cur = int(px * 100 + py);
+    // Hover only inside the still window; a click anywhere on the map.
+    const int hover_now = hover >= 0 && (still(hx, hy) || click) ? hover : -1;
+    Thread* th = t;
+    const size_t frame = size_t(fr - t->frames.data());
+    const Method* m = fr->method;
+    const Value vmap = map, vowner = free_owner;
+    return drive(hover_now, cur, 100 * 64 + 70, mx, my, click, right_click, 0, [&](int i) {
+        const int64_t X = i / 100, Y = i % 100;
+        pending = {th, frame, m};
+        return run_port(vm, still(X, Y) ? "mapCell" : "mapJump", {vmap, Value::integer(X), Value::integer(Y), vowner});
+    }, mask);
+}
+
+// The horizontal strips (a selector over a ScrollListH: OmakeActorSelector over OmakeActorList in
+// OmakeMain.selectActor; MahjongStageSelector / MahjongPlayerSelector over MahjongStageList / MahjongPlayerList in
+// Mahjong.selectStage / selectPlayer). The list shows `max` items, item pos + k at viewX + pitch k, baseY (66 apart, 7
+// shown); the selected one is pos + cur, framed by the selector's FrameCursor (four corners, no arrow). The owner moves
+// it with the selector's left() / right(): the cursor walks inside curMin..curMax and the list scrolls one item at the
+// ends (unless it is at its first or last place; a list shorter than seven wraps and never scrolls). So hover selects
+// only the items reachable without a scroll (the strip never slides under a still mouse); a click on an edge item
+// steps there (the list scrolls one) and confirms; the wheel is one left / right. Under the strip, the members' bar
+// (MahjongMentsu: three icons, the target slot lit) takes a hover or a click on a slot (its focus, as L2 / R2 do) while
+// it is active. Selector state 3 is the owner's question after a confirm: click confirms, right click cancels.
+// `after` 1: the stage strip, whose owner sets the bar to the stage's members after a move.
+bool MouseMenus::strip_update(VM& vm, const Scene& seen, const Value& sel, const Value& mentsu, int after, double mx,
+                              double my, bool inside, bool click, bool right_click, int wheel_steps, int& mask) {
+    probe.kind = 'j';
+    const Value* list = field(sel, "list");
+    const Value* cursor = field(sel, "cursor");
+    if (!list || !cursor || list->tag != Tag::Obj) return false;
+    const int64_t st = int_field(sel, "state", 0), sn = int_field(sel, "stateNext", 0);
+    if (st == 3 && sn == 0) {  // the question after a confirm (the owner's inner loop): confirm or cancel
+        if (free_frames_ > 0) {
+            --free_frames_;
+        } else if (click || right_click) {
+            mask = right_click ? CANCEL : CONFIRM;
+            free_frames_ = 1;
+        }
+        return true;
+    }
+    const DrawItem* corner = item_of(seen, uid_of(field(*cursor, "cur0")));
+    // Shown and taking input: opened (1), back from the question (4) or from the replay's list (8), nothing pending.
+    // Else (opening, closing, hidden under the owner's menu) the plain rule: click confirm, right click cancel.
+    if (!corner || corner->alpha <= 0.5 || sn != 0 || !(st == 1 || st == 4 || st == 8)) return false;
+    const Layout L = layout_of(seen, corner);
+    const int64_t pos = int_field(*list, "pos", 0), cur = int_field(*list, "cur", 0);
+    const int64_t total = int_field(*list, "listMax", 0), view = int_field(*list, "viewMax", 7);
+    const int64_t shown = int_field(*list, "max", 0), lo = int_field(*list, "curMin", 1), hi = int_field(*list, "curMax", 5);
+    const double vx = num_field(*list, "viewX"), pitch = num_field(*list, "pitch", 66), by = num_field(*list, "baseY");
+    if (total <= 0 || shown <= 0) return true;
+    // Inside the strip without a scroll: all of a short list, else the cursor's own range and the ends at the list's ends.
+    auto still = [&](int64_t k) {
+        return total < view || (k >= lo && k <= hi) || (k < lo && pos == 0) || (k > hi && pos == total - view);
+    };
+    int hover = -1;
+    bool hover_still = false;
+    for (int64_t k = 0; k < shown; ++k) {
+        const double x = L.X(vx + pitch * double(k)), y = L.Y(by);
+        if (k == cur) {
+            probe.has_sel = true;
+            probe.sel_x = x;
+            probe.sel_y = y;
+        }
+        if (inside && std::fabs(mx - x) <= L.D(pitch / 2) && std::fabs(my - y) <= L.D(28)) {  // the frame's corners: 28 out
+            hover = int(pos + k);
+            hover_still = still(k);
+            probe.has_tgt = true;
+            probe.tgt_x = x;
+            probe.tgt_y = y;
+        }
+    }
+    // The members' bar: its three icons, the hovered slot focused as L2 / R2 do (sound 21).
+    const Value* act = field(mentsu, "actFlag");
+    const Value* icons = field(mentsu, "icon");
+    if (act && act->truthy() && icons && free_frames_ == 0) {
+        const std::vector<Value> ic = elems(*icons);
+        const int64_t target = int_field(mentsu, "target", 0);
+        const bool moved = last_x_ < 1e8 && std::hypot(mx - last_x_, my - last_y_) > 1.0;
+        for (size_t s = 0; s < ic.size() && s < 3; ++s) {
+            const DrawItem* d = item_of(seen, uid_of(&ic[s]));
+            if (!inside || !d || d->alpha <= 0.5 || !hit(d, mx, my)) continue;
+            last_x_ = mx;
+            last_y_ = my;
+            if ((moved || click) && int64_t(s) != target) run_port(vm, "member", {mentsu, Value::integer(int64_t(s))});
+            return true;
+        }
+    }
+    const Value vsel = sel, vbar = mentsu;
+    const int at = int(pos + cur);
+    if (wheel_steps != 0 && free_frames_ == 0) {  // one item a notch: the owner's left / right
+        last_x_ = mx;
+        last_y_ = my;
+        confirm_for_ = -1;
+        run_port(vm, "strip", {vsel, vbar, Value::integer(after), Value::integer(wheel_steps > 0 ? -1 : 1)});
+        return true;
+    }
+    const int hover_now = hover >= 0 && (hover_still || click) ? hover : -1;
+    return drive(hover_now, at, int(total), mx, my, click, right_click, 0, [&](int i) {
+        return run_port(vm, "strip", {vsel, vbar, Value::integer(after), Value::integer(i - at)});
+    }, mask);
+}
+
+// Free play's talk (KaiwaFree.scriptMain(heroine, turn) over a KaiwaSelector in its local 3): 25 columns (five groups
+// of five) by three tensions, and a fourth row of one cell a group. The loop keeps the column in local 1 and the row in
+// local 2 (row 0 at the bottom: up adds one) and moves the cursor with KaiwaSelector.moveCursor(column, row), which
+// puts it at [-180, -96, -12, 72, 156][column / 5] + 16 (column % 5), [43, 1, -41, -67][row] (the fourth row at the
+// group's first place). Active while the selector is open (state 1) and its FrameCursor shows. Click confirm (the talk,
+// or the game's refusal), right click leave.
+bool MouseMenus::kaiwa_update(VM& vm, const Scene& seen, Thread* t, const Frame* fr, double mx, double my, bool inside,
+                              bool click, bool right_click, int wheel_steps, int& mask) {
+    probe.kind = 'K';
+    const size_t at = fr->base + 1 + 2;  // after the two arguments: the locals
+    if (at + 3 >= t->stack.size()) return false;
+    const Value sel = t->stack[at + 3];
+    if (!kind_of(vm, sel, "KaiwaSelector")) return false;  // not built yet
+    const Value* cursor = field(sel, "cursor");
+    const DrawItem* corner = cursor ? item_of(seen, uid_of(field(*cursor, "cur0"))) : nullptr;
+    // Closed (a talk, the menu) or moving: the plain rule (a talk's text goes on by click).
+    if (!corner || corner->alpha <= 0.5 || int_field(sel, "state", 0) != 1 || int_field(sel, "stateNext", 0) != 0) return false;
+    const Layout L = layout_of(seen, corner);
+    static const double GX[] = {-180, -96, -12, 72, 156}, RY[] = {43, 1, -41, -67};
+    const int64_t col = t->stack[at + 1].tag == Tag::Int ? t->stack[at + 1].i : 0;
+    const int64_t row = t->stack[at + 2].tag == Tag::Int ? t->stack[at + 2].i : 0;
+    // Cells: 0..74 the three rows (row * 25 + column), 75..79 the fourth row's groups.
+    auto place = [&](int i, double& x, double& y) {
+        if (i >= 75) {
+            x = GX[i - 75];
+            y = RY[3];
+        } else {
+            x = GX[(i % 25) / 5] + 16.0 * (i % 5);
+            y = RY[i / 25];
+        }
+    };
+    const int cur = row >= 3 ? int(75 + col / 5) : int(row * 25 + col);
+    int hover = -1;
+    for (int i = 0; i < 80; ++i) {
+        double x, y;
+        place(i, x, y);
+        if (i == cur) {
+            probe.has_sel = true;
+            probe.sel_x = L.X(x);
+            probe.sel_y = L.Y(y);
+        }
+        // A cell is 16 wide; the rows are 42 apart (the fourth 26 under the third); the fourth row's cell spans its
+        // group's five places (to check on a picture).
+        const bool in_x = i >= 75 ? mx >= L.X(x - 8) && mx <= L.X(x + 72) : std::fabs(mx - L.X(x)) <= L.D(8);
+        const double hh = i >= 75 || i / 25 == 2 ? 13 : 21;
+        if (inside && in_x && std::fabs(my - L.Y(y)) <= L.D(hh)) {
+            hover = i;
+            probe.has_tgt = true;
+            probe.tgt_x = L.X(x);
+            probe.tgt_y = L.Y(y);
+        }
+    }
+    Thread* th = t;
+    const Value vsel = sel;
+    return drive(hover, cur, 80, mx, my, click, right_click, wheel_steps, [&](int i) {
+        if (at + 2 >= th->stack.size()) return false;
+        const int64_t c = i >= 75 ? int64_t(i - 75) * 5 + col % 5 : i % 25, r = i >= 75 ? 3 : i / 25;
+        th->stack[at + 1] = Value::integer(c);  // the loop's own copies, as after a pad move
+        th->stack[at + 2] = Value::integer(r);
+        return run_port(vm, "kaiwaCell", {vsel, Value::integer(c), Value::integer(r)});
+    }, mask);
+}
+
+// Two information screens with a CommandMenu in a local and no confirm (cancel leaves): ClearInfo.scriptMain (free
+// play's cleared heroines: the menu in local 4, its index in local 6, the list in local 1; a move shows the heroine's
+// record, setInfo(list[i][1] % 9)) and FavorCheck.scriptMain(kind) (the menu in local 6, the index in local 7, the list
+// in local 3, the heroines' panel in local 0, the shown gauge and the closing one in locals 8 and 9). Hover selects
+// (PortMouse.clearInfo / favorCheck: the owner's move in one step), the wheel an entry a notch, right click leaves.
+bool MouseMenus::info_update(VM& vm, const Scene& seen, Thread* t, const Frame* fr, bool favor, double mx, double my,
+                             bool inside, bool click, bool right_click, int wheel_steps, int& mask) {
+    probe.kind = 'i';
+    const size_t at = fr->base + 1 + (favor ? 1 : 0);  // the locals (FavorCheck's loop has one argument)
+    if (at + (favor ? 9 : 6) >= t->stack.size()) return false;
+    const Value menu = t->stack[at + (favor ? 6 : 4)];
+    if (!kind_of(vm, menu, "CommandMenu")) return false;  // not built yet
+    arrow_uid = uid_of(field(menu, "cursor"));
+    const int n = int(int_field(menu, "nofCom", 0)), next = int(int_field(menu, "nextCurY"));
+    const int hover = inside ? command_entry_at(menu, seen, mx, my) : -1;
+    if (!command_active(menu)) return false;
+    Thread* th = t;
+    const size_t frame = size_t(fr - t->frames.data());
+    const Method* m = fr->method;
+    const Value list = t->stack[at + (favor ? 3 : 1)];
+    const Value panel = favor ? t->stack[at] : Value();
+    // No confirm on these screens: a click on the selected entry presses confirm, which their loops ignore.
+    return drive(hover, next, n, mx, my, click, right_click, wheel_steps, [&](int i) {
+        pending = {th, frame, m};
+        if (!favor) return run_port(vm, "clearInfo", {th->stack[fr->base], menu, Value::integer(i), list});
+        return run_port(vm, "favorCheck", {panel, menu, Value::integer(i), list, th->stack[at + 8], th->stack[at + 9]});
     }, mask);
 }
 

@@ -144,10 +144,10 @@ Tests (2026-10-15, headless `amagami_vm --save-dir`):
 
 Keep the script-level blobs byte for byte, and implement the 11 primitives as file operations. Then no script changes, saves stay compatible with the game's own restore logic, and a PS2 save could later be imported by extracting the same blobs. Built as described here (F4-10).
 
-Location: `%APPDATA%\open-amagami\save\` on Windows (roaming, as Windows games usually do; read from the `APPDATA` variable), `./save` elsewhere. `--save-dir DIR` or the `AMG_SAVE_DIR` variable override it.
+Location: `portable-data\save\` beside the executable on Windows (D-048; nothing is written outside the program's folder), `./save` elsewhere. `--save-dir DIR` or the `AMG_SAVE_DIR` variable override it.
 
 ```
-%APPDATA%\open-amagami\save\
+portable-data\save\
     system.bin          system data blob (serializer bytes, as written by the script)
     slot00.head ... slot19.head   256-byte header blobs
     slot00.body ... slot19.body   body blobs
